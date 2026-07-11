@@ -115,7 +115,7 @@ def check_timer_intent(sentence: str) -> bool:
     clean_text = sentence.replace(" ", "").lower()
     
     # 2. 명시적 핵심 키워드 검사
-    direct_keywords = ["타이머", "스탑워치", "스톱워치", "초시계", "시계바늘", "카운트다운", "타임업"]
+    direct_keywords = ["타이머", "스탑워치", "스톱워치", "초시계", "시계바늘", "카운트다운", "타임업", "타이마", "타이먼지"]
     if any(kw in clean_text for kw in direct_keywords):
         return True
         
@@ -191,18 +191,21 @@ def process_user_command(user_sentence: str):
     # Step 1: 타이머를 원하는 문장인지 의도 추론
     if not check_timer_intent(user_sentence):
         print("-> 타이머/스탑워치 관련 명령이 아닙니다.")
+        text_to_speech_and_play(f"인지된 음성은 {user_sentence} 입니다")
         return
 
     # Step 2: 문장에서 시간 매칭 및 단위 변환
     time_argument = extract_time_unit(user_sentence)
     if not time_argument:
         print("-> 타이머 명령인 것 같지만, 정확한 시간을 인식하지 못했습니다. (예: 3분, 10초)")
+        text_to_speech_and_play(f"인지된 음성은 {user_sentence} 입니다. 타이머 명령인 것 같지만, 정확한 시간을 인식하지 못했습니다.")
         return
         
     print(f"-> 의도 확인 완료! 추출된 시간 파라미터: {time_argument}")
     
     # Step 3: 외부 타이머 스크립트 실행
     try:
+        text_to_speech_and_play(f"{time_argument} 뒤에 알람을 실행합니다.")
         subprocess.run([sys.executable, "timer.py", time_argument], check=True)
     except Exception as e:
         print(f"스크립트 실행 실패: {e}")
@@ -255,10 +258,8 @@ try:
             # print(f"🤖 헤르메스: {agent_text}")
             # messages_history.append({"role": "assistant", "content": agent_text})
             
-            # TTS 출력
-            text_to_speech_and_play(f"인지된 음성은 {user_text} 입니다")
 
-            # 타이머 실행 체크
+            # 타이머 실행 체크 및 tts
             process_user_command(user_text)
 
             print("====================================================")

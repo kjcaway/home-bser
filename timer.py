@@ -93,7 +93,6 @@ def main():
     # 비프음 5번 출력
     for _ in range(2):
         text_to_speech_and_play("잇츠 타임투 풒")
-        time.sleep(0.5) # 비프음 사이의 간격
 
 if __name__ == "__main__":
     main()
