@@ -12,7 +12,7 @@ CHANNELS = 1
 RATE = 16000                 
 RECORD_SECONDS = 5           
 MODEL_NAME = "qwen3:14b"     # 사용 중인 Hermes 모델명
-TTS_OUTPUT_FILE = "response.wav"
+TTS_OUTPUT_FILE = "poop.wav"
 
 # 2-3. TTS (MMS-VITS)
 tts_device = "cuda" if torch.cuda.is_available() else "cpu"
