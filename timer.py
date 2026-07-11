@@ -1,19 +1,63 @@
 import sys
 import time
+import wave
 import re
-import platform
+import torch
+from transformers import VitsModel, AutoTokenizer
+import pyaudio
 
-def play_beep():
-    """운영체제에 맞는 비프음을 출력합니다."""
-    os_name = platform.system()
-    if os_name == "Windows":
-        import winsound
-        # 주파수 1000Hz, 지속시간 500ms
-        winsound.Beep(1000, 500)
-    else:
-        # Mac 또는 Linux 환경 (터미널 벨소리 사용)
-        sys.stdout.write('\a')
-        sys.stdout.flush()
+CHUNK = 1280                 
+FORMAT = pyaudio.paInt16     
+CHANNELS = 1                 
+RATE = 16000                 
+RECORD_SECONDS = 5           
+MODEL_NAME = "qwen3:14b"     # 사용 중인 Hermes 모델명
+TTS_OUTPUT_FILE = "response.wav"
+
+# 2-3. TTS (MMS-VITS)
+tts_device = "cuda" if torch.cuda.is_available() else "cpu"
+tts_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-kor")
+tts_model = VitsModel.from_pretrained("facebook/mms-tts-kor").to(tts_device)
+
+
+# ==========================================
+# 3. TTS 및 재생 함수
+# ==========================================
+def text_to_speech_and_play(text):
+    print("🗣️ 답변을 음성으로 변환 중...")
+    
+    # 1. 텍스트를 오디오 파일로 변환
+    inputs = tts_tokenizer(text, return_tensors="pt").to(tts_device)
+    with torch.no_grad():
+        output = tts_model(**inputs).waveform
+        
+    audio_data = output.cpu().numpy().squeeze()
+    audio_data = (audio_data * 32767).astype(np.int16)
+    
+    with wave.open(TTS_OUTPUT_FILE, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(tts_model.config.sampling_rate)
+        wav_file.writeframes(audio_data.tobytes())
+        
+    # 2. 생성된 파일 스피커로 재생
+    print("🔊 스피커 출력 중...")
+    wf = wave.open(TTS_OUTPUT_FILE, 'rb')
+    p = pyaudio.PyAudio()
+    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True)
+    
+    data = wf.readframes(1024)
+    while len(data) > 0:
+        stream.write(data)
+        data = wf.readframes(1024)
+        
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+wf.close()
 
 def main():
     # 인자 개수 확인
@@ -46,8 +90,8 @@ def main():
     print("시간이 되었습니다!")
     
     # 비프음 5번 출력
-    for _ in range(5):
-        play_beep()
+    for _ in range(2):
+        text_to_speech_and_play("잇츠 타임투 풒")
         time.sleep(0.5) # 비프음 사이의 간격
 
 if __name__ == "__main__":
