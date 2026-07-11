@@ -115,7 +115,7 @@ def check_timer_intent(sentence: str) -> bool:
     clean_text = sentence.replace(" ", "").lower()
     
     # 2. 명시적 핵심 키워드 검사
-    direct_keywords = ["타이머", "스탑워치", "스톱워치", "초시계", "시계바늘", "카운트다운"]
+    direct_keywords = ["타이머", "스탑워치", "스톱워치", "초시계", "시계바늘", "카운트다운", "타임업"]
     if any(kw in clean_text for kw in direct_keywords):
         return True
         

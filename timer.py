@@ -5,6 +5,7 @@ import re
 import torch
 from transformers import VitsModel, AutoTokenizer
 import pyaudio
+import numpy as np 
 
 CHUNK = 1280                 
 FORMAT = pyaudio.paInt16     
@@ -57,7 +58,7 @@ def text_to_speech_and_play(text):
     stream.stop_stream()
     stream.close()
     p.terminate()
-wf.close()
+    wf.close()
 
 def main():
     # 인자 개수 확인
