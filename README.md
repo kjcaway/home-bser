@@ -15,5 +15,5 @@ python3 -m venv .
 pip3 install pyaudio numpy openwakeword faster-whisper
 pip3 install nvidia-cublas-cu12 nvidia-cudnn-cu12
 pip3 install requests
-pip install torch transformers scipy
+pip3 install torch transformers scipy
 ```
