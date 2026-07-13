@@ -2,6 +2,12 @@
 /bin
 /include
 /lib
-pyvenv.cfg
 /share
+pyvenv.cfg
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# TTS runtime output
 response.wav
