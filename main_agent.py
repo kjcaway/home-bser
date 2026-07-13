@@ -52,7 +52,7 @@ def main():
     # ==========================================
     # 1. 환경 설정 (--device 인자 파싱)
     # ==========================================
-    device, stt_compute_type = parse_device_args()
+    device, stt_compute_type, input_device_index = parse_device_args()
 
     # ==========================================
     # 2. 모든 로컬 모델 로드 (Wake Word, STT, TTS)
@@ -68,7 +68,7 @@ def main():
     # ==========================================
     # 3. 메인 루프 (마이크 스트림 및 파이프라인)
     # ==========================================
-    audio, stream = open_input_stream()
+    audio, stream = open_input_stream(input_device_index)
 
     print("\n====================================================")
     print("🎙️ [최종 보이스 에이전트 가동] '알렉사'라고 부르고 대화해보세요!")

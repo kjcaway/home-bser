@@ -16,15 +16,20 @@ All commands must run inside the venv (the repo root). Activate first:
 source bin/activate
 ```
 
-Run the full agent (needs a mic and speaker; GPU optional via `--device`):
+Run the full agent (needs a mic and speaker; environment selected via `--environment`):
 
 ```bash
-python main_agent.py                 # default: cpu
-python main_agent.py --device cuda   # run STT/TTS on CUDA GPU
-python main_agent.py --device cpu    # explicit cpu
+python main_agent.py                    # default: dev
+python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
+python main_agent.py --environment prod # 운영환경: cuda GPU, mic index 1
 ```
 
-`--device` (choices `cpu`/`cuda`, **default `cpu`**) is parsed with `argparse` and drives both STT and TTS. The selected device is logged at startup (`[System] 실행 디바이스: ...`). STT `compute_type` is derived from it automatically — `float16` for cuda, `int8` for cpu (faster-whisper does not support `float16` on CPU). Passing `--device cuda` without a working CUDA setup raises an error; there is no automatic CPU fallback.
+`--environment` (choices `dev`/`prod`, **default `dev`**) is parsed with `argparse` and selects a preset that drives both the compute device and the microphone. Presets live in the `ENVIRONMENTS` dict in `agent/config.py`:
+
+- `dev` — `device=cpu`, `input-device=0` (개발환경)
+- `prod` — `device=cuda`, `input-device=1` (운영환경)
+
+The selected environment is logged at startup (`[System] 실행 환경: ...`). STT `compute_type` is derived from the device automatically — `float16` for cuda, `int8` for cpu (faster-whisper does not support `float16` on CPU). Selecting `prod` without a working CUDA setup raises an error; there is no automatic CPU fallback. The mic index is passed to `open_input_stream(device_index)`; if opening fails, the available input devices are listed to aid diagnosis.
 
 Run standalone utilities:
 
@@ -44,8 +49,8 @@ pip3 install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
-- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), and `parse_device_args()` (the `--device` argparse logic).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream()`, `record_frames()`, `play_wav_file()`.
+- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, and `parse_device_args()` (the `--environment` argparse logic; returns `(device, stt_compute_type, input_device_index)`).
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `list_input_devices()`, `record_frames()`, `play_wav_file()`.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
@@ -75,7 +80,7 @@ The original design (documented in `GEMINI.md`) routed transcribed text to a loc
 
 ## Environment assumptions
 
-- **`main_agent.py` device is selectable** via `--device cpu|cuda` (default `cpu`); the chosen device drives both STT and TTS. `timer.py` auto-detects (`cuda` if available, else `cpu`).
+- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives both the compute device (STT/TTS) and the mic input index (`dev`=cpu/mic 0, `prod`=cuda/mic 1). `timer.py` auto-detects (`cuda` if available, else `cpu`).
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
 - Code comments, prompts, and print output are in Korean.

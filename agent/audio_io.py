@@ -5,11 +5,40 @@ import pyaudio
 from agent.config import CHUNK, FORMAT, CHANNELS, RATE
 
 
-def open_input_stream():
-    """마이크 입력 스트림을 열고 (PyAudio 인스턴스, 스트림) 을 반환합니다."""
+def list_input_devices(audio):
+    """사용 가능한 입력(마이크) 장치 목록을 출력합니다."""
+    print("[System] 사용 가능한 입력 장치 목록:")
+    found = False
+    for i in range(audio.get_device_count()):
+        info = audio.get_device_info_by_index(i)
+        if int(info.get("maxInputChannels", 0)) > 0:
+            found = True
+            print(f"    [{i}] {info['name']} "
+                  f"(채널 {int(info['maxInputChannels'])}, "
+                  f"기본 {int(info['defaultSampleRate'])}Hz)")
+    if not found:
+        print("    (입력 가능한 장치를 찾지 못했습니다. 마이크 연결/권한을 확인하세요.)")
+
+
+def open_input_stream(device_index=None):
+    """마이크 입력 스트림을 열고 (PyAudio 인스턴스, 스트림) 을 반환합니다.
+
+    device_index 를 지정하면 해당 PyAudio 입력 장치를 사용합니다.
+    열기에 실패하면 사용 가능한 입력 장치 목록을 출력하여 진단을 돕습니다.
+    """
     audio = pyaudio.PyAudio()
-    stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE,
-                        input=True, frames_per_buffer=CHUNK)
+    try:
+        stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE,
+                            input=True, frames_per_buffer=CHUNK,
+                            input_device_index=device_index)
+    except OSError as e:
+        print(f"❌ 마이크 입력 스트림 열기에 실패했습니다: {e}")
+        print(f"   (요청 설정: {RATE}Hz / {CHANNELS}채널 / 16-bit, "
+              f"장치 인덱스: {device_index if device_index is not None else '기본'})")
+        list_input_devices(audio)
+        print("   → --input-device <인덱스> 로 위 목록의 장치를 지정해 다시 실행하세요.")
+        audio.terminate()
+        raise
     return audio, stream
 
 
