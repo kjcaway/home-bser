@@ -15,7 +15,37 @@ from agent.audio_io import (
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
 from agent.tts import TextToSpeech
-from agent.intent import process_user_command
+from agent.skills import timer
+
+
+# ==========================================
+# 스킬 레지스트리
+# ==========================================
+# 각 스킬은 handle(user_text, tts) -> bool 규약을 따른다.
+# 자신이 처리할 명령이면 수행 후 True, 아니면 False 를 반환한다.
+# 새 기능 추가 = handle 함수를 작성해 이 리스트에 등록하면 끝. (아래 루프는 그대로)
+SKILLS = [
+    timer.handle,
+]
+
+
+# ==========================================
+# 코어: 사용자 명령 수행 (스킬 디스패처)
+# ==========================================
+def execute_command(user_text, tts):
+    """등록된 스킬을 순회하며 명령을 처리한다.
+
+    처리한 스킬이 있으면 종료하고, 없으면 인식 결과를 그대로 안내한다.
+    """
+    print(f"\n[사용자 입력]: \"{user_text}\"")
+
+    for skill in SKILLS:
+        if skill(user_text, tts):
+            return
+
+    # 처리 가능한 스킬이 없을 때의 폴백
+    print("-> 처리 가능한 스킬이 없습니다.")
+    tts.speak(f"인지된 음성은 {user_text} 입니다")
 
 
 def main():
@@ -71,8 +101,8 @@ def main():
                 if user_text:
                     print(f"👤 사용자: {user_text}")
 
-                    # 타이머 실행 체크 및 tts
-                    process_user_command(user_text, tts)
+                    # 코어: 사용자 명령 수행
+                    execute_command(user_text, tts)
 
                 print("====================================================")
                 print("🎙️ 대기 중...")

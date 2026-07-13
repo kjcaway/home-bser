@@ -123,27 +123,31 @@ def run_timer_script(time_arg):
 
 
 # ==========================================
-# 문장으로부터 타이머 요청 여부를 파악한 뒤, 시간을 추출하고 timer.py를 실행하는 함수
+# 타이머 스킬 진입점
 # ==========================================
-def process_user_command(user_sentence: str, tts):
-    """사용자 문장을 처리합니다. tts 는 speak(text) 메서드를 가진 TTS 엔진입니다."""
-    print(f"\n[사용자 입력]: \"{user_sentence}\"")
+def handle(user_sentence: str, tts) -> bool:
+    """타이머 스킬 진입점.
 
+    문장이 타이머 요청이면 시간을 추출해 timer.py를 실행하고 True를 반환합니다.
+    타이머 요청이 아니면 아무 것도 하지 않고 False를 반환하여
+    디스패처가 다음 스킬로 넘어가도록 합니다.
+
+    tts 는 speak(text) 메서드를 가진 TTS 엔진입니다.
+    """
     # Step 1: 타이머를 원하는 문장인지 의도 추론
     if not check_timer_intent(user_sentence):
-        print("-> 타이머/스탑워치 관련 명령이 아닙니다.")
-        tts.speak(f"인지된 음성은 {user_sentence} 입니다")
-        return
+        return False
 
     # Step 2: 문장에서 시간 매칭 및 단위 변환
     time_argument = extract_time_unit(user_sentence)
     if not time_argument:
         print("-> 타이머 명령인 것 같지만, 정확한 시간을 인식하지 못했습니다. (예: 3분, 10초)")
         tts.speak(f"인지된 음성은 {user_sentence} 입니다. 타이머 명령인 것 같지만, 정확한 시간을 인식하지 못했습니다.")
-        return
+        return True
 
     print(f"-> 의도 확인 완료! 추출된 시간 파라미터: {time_argument}")
 
     # Step 3: 외부 타이머 스크립트 실행
     tts.speak(f"{format_time_korean(time_argument)} 뒤에 알람을 실행합니다.")
     run_timer_script(time_argument)
+    return True
