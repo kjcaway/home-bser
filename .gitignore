@@ -3,3 +3,5 @@
 /include
 /lib
 pyvenv.cfg
+/share
+response.wav

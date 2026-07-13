@@ -6,27 +6,36 @@ import numpy as np
 import openwakeword
 from openwakeword.model import Model
 from faster_whisper import WhisperModel
-# import ollama
 import torch
 from transformers import VitsModel, AutoTokenizer
 import subprocess
 import sys
 import re
+import argparse
 
 # ==========================================
 # 1. 환경 설정
 # ==========================================
-CHUNK = 1280                 
-FORMAT = pyaudio.paInt16     
-CHANNELS = 1                 
-RATE = 16000                 
-RECORD_SECONDS = 5           
-MODEL_NAME = "qwen3:14b"     # 사용 중인 Hermes 모델명
+CHUNK = 1280
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+RECORD_SECONDS = 5
 TTS_OUTPUT_FILE = "response.wav"
 
-messages_history = [
-    {"role": "system", "content": "당신은 음성으로 대화하는 친절하고 간결한 AI 비서 '헤르메스'입니다. 답변을 나중에 음성으로 읽어주어야 하므로, 특수문자나 복잡한 기호는 빼고 자연스러운 구어체로 2~3문장 이내로 짧게 대답해 주세요."}
-]
+# 실행 인자 파싱: --device 로 cpu / cuda 선택 (기본값: cpu)
+parser = argparse.ArgumentParser(description="로컬 오프라인 보이스 에이전트")
+parser.add_argument(
+    "--device",
+    choices=["cpu", "cuda"],
+    default="cpu",
+    help="STT/TTS 모델을 실행할 디바이스 (기본값: cpu)",
+)
+args = parser.parse_args()
+DEVICE = args.device
+# STT(Faster-Whisper) compute_type: GPU는 float16, CPU는 int8 이 적합합니다.
+STT_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
+print(f"[System] 실행 디바이스: {DEVICE} (STT compute_type: {STT_COMPUTE_TYPE})")
 
 # ==========================================
 # 2. 모든 로컬 모델 로드 (Wake Word, STT, TTS)
@@ -38,11 +47,11 @@ pretrained_models = openwakeword.get_pretrained_model_paths()
 alexa_path = [path for path in pretrained_models if "alexa" in path.lower()][0]
 oww_model = Model(wakeword_model_paths=[alexa_path])
 
-# 2-2. STT (Faster-Whisper) - GPU 모드 기준
-whisper_model = WhisperModel("small", device="cuda", compute_type="float16")
+# 2-2. STT (Faster-Whisper)
+whisper_model = WhisperModel("small", device=DEVICE, compute_type=STT_COMPUTE_TYPE)
 
 # 2-3. TTS (MMS-VITS)
-tts_device = "cuda" if torch.cuda.is_available() else "cpu"
+tts_device = DEVICE
 tts_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-kor")
 tts_model = VitsModel.from_pretrained("facebook/mms-tts-kor").to(tts_device)
 
@@ -247,17 +256,6 @@ try:
                 continue
                 
             print(f"👤 사용자: {user_text}")
-            
-            # # LLM 처리
-            # messages_history.append({"role": "user", "content": user_text})
-            
-            # # TTS가 문장을 통째로 읽어야 자연스러우므로, 스트리밍 대신 한 번에 답변을 받습니다.
-            # response = ollama.chat(model=MODEL_NAME, messages=messages_history)
-            # agent_text = response['message']['content']
-            
-            # print(f"🤖 헤르메스: {agent_text}")
-            # messages_history.append({"role": "assistant", "content": agent_text})
-            
 
             # 타이머 실행 체크 및 tts
             process_user_command(user_text)
