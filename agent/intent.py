@@ -81,6 +81,27 @@ def extract_time_unit(sentence: str) -> str | None:
 
 
 # ==========================================
+# 시간 인자를 한국어 표현으로 변환하는 함수
+# ==========================================
+def format_time_korean(time_arg: str) -> str:
+    """'10s' / '5m' 형태의 시간 인자를 음성 안내용 한국어 표현으로 변환합니다.
+
+    예: '10s' -> '10초', '5m' -> '5분', '90s' -> '1분 30초'
+    """
+    value = int(time_arg[:-1])
+    unit = time_arg[-1]
+    total_seconds = value * 60 if unit == "m" else value
+
+    minutes, seconds = divmod(total_seconds, 60)
+    parts = []
+    if minutes:
+        parts.append(f"{minutes}분")
+    if seconds or not parts:
+        parts.append(f"{seconds}초")
+    return " ".join(parts)
+
+
+# ==========================================
 # 타이머 스크립트 실행 함수
 # ==========================================
 def run_timer_script(time_arg):
@@ -124,5 +145,5 @@ def process_user_command(user_sentence: str, tts):
     print(f"-> 의도 확인 완료! 추출된 시간 파라미터: {time_argument}")
 
     # Step 3: 외부 타이머 스크립트 실행
-    tts.speak(f"{time_argument} 뒤에 알람을 실행합니다.")
+    tts.speak(f"{format_time_korean(time_argument)} 뒤에 알람을 실행합니다.")
     run_timer_script(time_argument)

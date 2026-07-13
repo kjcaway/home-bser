@@ -6,8 +6,13 @@ from agent.config import (
     WAKE_RESPONSE_FILE,
     parse_device_args,
 )
-from agent.audio_io import open_input_stream, record_frames, play_wav_file
-from agent.wakeword import load_wakeword_model, get_score
+from agent.audio_io import (
+    open_input_stream,
+    record_frames,
+    play_wav_file,
+    flush_input_stream,
+)
+from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
 from agent.tts import TextToSpeech
 from agent.intent import process_user_command
@@ -56,20 +61,27 @@ def main():
                 pcm_bytes = record_frames(stream, RECORD_SECONDS)
 
                 print("🛑 녹음 완료! 생각 중...")
+
+                # STT/명령 처리(TTS·알람 재생 포함) 동안 마이크 입력을 정지하여
+                # 스피커 출력이 녹음되어 웨이크워드를 재호출하는 것을 방지
+                stream.stop_stream()
+
                 user_text = transcribe_pcm(whisper_model, pcm_bytes)
 
-                if not user_text:
-                    continue
+                if user_text:
+                    print(f"👤 사용자: {user_text}")
 
-                print(f"👤 사용자: {user_text}")
-
-                # 타이머 실행 체크 및 tts
-                process_user_command(user_text, tts)
+                    # 타이머 실행 체크 및 tts
+                    process_user_command(user_text, tts)
 
                 print("====================================================")
                 print("🎙️ 대기 중...")
 
-                oww_model.reset()
+                # 마이크 입력 재개 후, 정지 전후로 버퍼에 남아 있던 오디오를 비우고
+                # 호출어 모델의 특징 버퍼도 무음으로 초기화 (직전 호출어 재감지 방지)
+                stream.start_stream()
+                flush_input_stream(stream)
+                reset_wakeword_state(oww_model)
 
     except KeyboardInterrupt:
         print("\n[System] 시스템을 종료합니다.")

@@ -1,9 +1,9 @@
 import sys
 import time
 import re
-import torch
 
-from agent.tts import TextToSpeech
+from agent.audio_io import play_wav_file
+from agent.config import TIMER_ALARM_FILE
 
 
 def main():
@@ -29,10 +29,6 @@ def main():
     else:
         seconds = value
 
-    # TTS 엔진 로드 (알람 시점의 지연을 막기 위해 대기 전에 미리 로드)
-    tts_device = "cuda" if torch.cuda.is_available() else "cpu"
-    tts = TextToSpeech(tts_device)
-
     print(f"[{time_input}] {seconds}초 후에 알람이 울립니다...")
 
     # 지정된 시간만큼 대기
@@ -40,9 +36,9 @@ def main():
 
     print("시간이 되었습니다!")
 
-    # 알람 음성 2번 출력
+    # 알람음 2번 재생
     for _ in range(2):
-        tts.speak("잇츠 타임투 풒")
+        play_wav_file(TIMER_ALARM_FILE)
 
 
 if __name__ == "__main__":

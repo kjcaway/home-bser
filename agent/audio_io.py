@@ -22,6 +22,16 @@ def record_frames(stream, seconds):
     return b''.join(frames)
 
 
+def flush_input_stream(stream):
+    """입력 스트림 버퍼에 쌓인 오래된 오디오를 비웁니다.
+
+    TTS 재생이나 타이머 실행 등으로 루프가 블로킹된 동안 마이크에 녹음된
+    소리(스피커 출력 포함)가 버퍼에 남아 웨이크워드를 오인식시키는 것을 방지합니다.
+    """
+    while stream.get_read_available() >= CHUNK:
+        stream.read(CHUNK, exception_on_overflow=False)
+
+
 def play_wav_file(file_path):
     """wav 파일을 스피커로 재생합니다."""
     if not os.path.exists(file_path):
