@@ -50,7 +50,7 @@ pip3 install nvidia-cublas-cu12 nvidia-cudnn-cu12
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, and `parse_device_args()` (the `--environment` argparse logic; returns `(device, stt_compute_type, input_device_index)`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `list_input_devices()`, `record_frames()`, `play_wav_file()`.
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `record_frames()`, `play_wav_file()`.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
@@ -65,6 +65,15 @@ Models are loaded once inside `main()` (not at import time), so other scripts ca
 3. **STT** — records `RECORD_SECONDS` (5s), transcribes with faster-whisper (Korean).
 4. **Intent + action** — `process_user_command()` (see below).
 5. Calls `oww_model.reset()` after each turn to clear wake-word state.
+
+### Microphone capture (sample-rate handling)
+
+The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assume 16 kHz). Most raw hardware ALSA devices (`hw:*`) do **not** support 16 kHz directly, so PyAudio fails with `-9997 Invalid sample rate` (and `-9999` on other mismatches). `open_input_stream()` therefore returns a `MicStream` wrapper instead of a bare PyAudio stream:
+
+1. It first tries to open the device at 16 kHz / mono directly — sound-server devices (`pulse`, `default`, `sysdefault`) support this via their own conversion.
+2. If that raises `OSError`, it reopens the device at its **native** sample rate and channel count (e.g. USB-C Speaker = 48000 Hz stereo) and, on every `read()`, downmixes to mono and resamples to 16 kHz in software via `scipy.signal.resample_poly`. This path logs `[System] 마이크 네이티브 …Hz/…ch → 16000Hz/모노 소프트웨어 변환 사용` at startup.
+
+`MicStream` exposes the same `read()`, `start_stream()`, `stop_stream()`, `close()`, and `get_read_available()` interface as a PyAudio stream, so `main_agent.py`, `record_frames()`, and `flush_input_stream()` use it unchanged. `scipy` is a required dependency for this resampling path.
 
 ### Intent handling (current behavior)
 

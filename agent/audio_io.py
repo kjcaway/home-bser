@@ -1,8 +1,104 @@
 import os
 import wave
+from math import gcd
+
+import numpy as np
 import pyaudio
+from scipy.signal import resample_poly
 
 from agent.config import CHUNK, FORMAT, CHANNELS, RATE
+
+
+class MicStream:
+    """장치 네이티브 샘플레이트로 캡처해 16kHz 모노 int16 로 변환해주는 래퍼.
+
+    다수의 하드웨어(hw:*) 마이크는 16000Hz/모노를 직접 지원하지 않아 PyAudio가
+    -9997(Invalid sample rate)로 실패한다. 이 클래스는 우선 16kHz/모노로 직접
+    열기를 시도하고(pulse/default 등 변환 지원 장치는 성공), 실패하면 장치의
+    네이티브 레이트/채널로 열어 read() 할 때마다 16kHz 모노로 소프트웨어 변환한다.
+
+    stream.read/start_stream/stop_stream/close/get_read_available 인터페이스를
+    그대로 노출하므로 기존 호출부(main_agent, record_frames, flush)는 수정 불필요.
+    """
+
+    def __init__(self, audio, device_index=None):
+        self.audio = audio
+        self._device_index = device_index
+
+        # 1) 16kHz/모노 직접 시도 (사운드서버 계열 장치는 성공)
+        try:
+            self._stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE,
+                                      input=True, frames_per_buffer=CHUNK,
+                                      input_device_index=device_index)
+            self.capture_rate = RATE
+            self.capture_channels = CHANNELS
+            self._needs_convert = False
+            return
+        except OSError:
+            pass  # 하드웨어 장치 → 네이티브 캡처 + 소프트웨어 변환으로 폴백
+
+        # 2) 장치 네이티브 설정으로 열고 변환
+        if device_index is not None:
+            info = audio.get_device_info_by_index(device_index)
+        else:
+            info = audio.get_default_input_device_info()
+        self.capture_rate = int(info["defaultSampleRate"])
+        self.capture_channels = 2 if int(info["maxInputChannels"]) >= 2 else 1
+
+        self._stream = audio.open(format=FORMAT, channels=self.capture_channels,
+                                  rate=self.capture_rate, input=True,
+                                  frames_per_buffer=self._native_frames(CHUNK),
+                                  input_device_index=device_index)
+        self._needs_convert = True
+        g = gcd(RATE, self.capture_rate)
+        self._up = RATE // g
+        self._down = self.capture_rate // g
+        print(f"[System] 마이크 네이티브 {self.capture_rate}Hz/{self.capture_channels}ch "
+              f"→ {RATE}Hz/모노 소프트웨어 변환 사용")
+
+    def _native_frames(self, target_frames):
+        """16kHz 기준 target_frames 에 대응하는 네이티브 프레임 수."""
+        return int(round(target_frames * self.capture_rate / RATE))
+
+    def read(self, num_frames, exception_on_overflow=False):
+        """16kHz 모노 int16 PCM 바이트를 num_frames 개 반환한다."""
+        if not self._needs_convert:
+            return self._stream.read(num_frames, exception_on_overflow=exception_on_overflow)
+
+        native = self._native_frames(num_frames)
+        raw = self._stream.read(native, exception_on_overflow=exception_on_overflow)
+        samples = np.frombuffer(raw, dtype=np.int16)
+
+        if self.capture_channels > 1:
+            usable = (len(samples) // self.capture_channels) * self.capture_channels
+            samples = samples[:usable].reshape(-1, self.capture_channels).mean(axis=1)
+        else:
+            samples = samples.astype(np.float64)
+
+        converted = resample_poly(samples, self._up, self._down)
+
+        # 정확히 num_frames 길이로 맞춤 (경계 오차 보정)
+        if len(converted) >= num_frames:
+            converted = converted[:num_frames]
+        else:
+            converted = np.pad(converted, (0, num_frames - len(converted)))
+
+        return np.clip(np.round(converted), -32768, 32767).astype(np.int16).tobytes()
+
+    def get_read_available(self):
+        avail = self._stream.get_read_available()
+        if not self._needs_convert:
+            return avail
+        return int(avail * RATE / self.capture_rate)
+
+    def start_stream(self):
+        self._stream.start_stream()
+
+    def stop_stream(self):
+        self._stream.stop_stream()
+
+    def close(self):
+        self._stream.close()
 
 
 def list_input_devices(audio):
@@ -23,20 +119,20 @@ def list_input_devices(audio):
 def open_input_stream(device_index=None):
     """마이크 입력 스트림을 열고 (PyAudio 인스턴스, 스트림) 을 반환합니다.
 
-    device_index 를 지정하면 해당 PyAudio 입력 장치를 사용합니다.
-    열기에 실패하면 사용 가능한 입력 장치 목록을 출력하여 진단을 돕습니다.
+    device_index 를 지정하면 해당 PyAudio 입력 장치를 사용합니다. 장치가 16kHz를
+    직접 지원하지 않으면 네이티브 레이트로 캡처 후 16kHz로 소프트웨어 변환합니다
+    (MicStream). 열기에 실패하면 사용 가능한 입력 장치 목록을 출력하여 진단을 돕습니다.
     """
     audio = pyaudio.PyAudio()
     try:
-        stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE,
-                            input=True, frames_per_buffer=CHUNK,
-                            input_device_index=device_index)
+        stream = MicStream(audio, device_index)
     except OSError as e:
         print(f"❌ 마이크 입력 스트림 열기에 실패했습니다: {e}")
         print(f"   (요청 설정: {RATE}Hz / {CHANNELS}채널 / 16-bit, "
               f"장치 인덱스: {device_index if device_index is not None else '기본'})")
         list_input_devices(audio)
-        print("   → --input-device <인덱스> 로 위 목록의 장치를 지정해 다시 실행하세요.")
+        print("   → 실행 환경 프리셋(agent/config.py ENVIRONMENTS)의 "
+              "input_device_index 를 위 목록의 장치로 지정해 다시 실행하세요.")
         audio.terminate()
         raise
     return audio, stream
