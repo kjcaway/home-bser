@@ -50,7 +50,7 @@ pip3 install nvidia-cublas-cu12 nvidia-cudnn-cu12
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, and `parse_device_args()` (the `--environment` argparse logic; returns `(device, stt_compute_type, input_device_index)`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `record_frames()`, `play_wav_file()`.
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
@@ -74,6 +74,15 @@ The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assum
 2. If that raises `OSError`, it reopens the device at its **native** sample rate and channel count (e.g. USB-C Speaker = 48000 Hz stereo) and, on every `read()`, downmixes to mono and resamples to 16 kHz in software via `scipy.signal.resample_poly`. This path logs `[System] 마이크 네이티브 …Hz/…ch → 16000Hz/모노 소프트웨어 변환 사용` at startup.
 
 `MicStream` exposes the same `read()`, `start_stream()`, `stop_stream()`, `close()`, and `get_read_available()` interface as a PyAudio stream, so `main_agent.py`, `record_frames()`, and `flush_input_stream()` use it unchanged. `scipy` is a required dependency for this resampling path.
+
+### Playback (sample-rate handling)
+
+Playback has the mirror-image problem: the wav files (`res0.wav`, the TTS `response.wav`, the timer alarm) are all 16 kHz, but raw hardware output devices reject that rate with `-9999`. `play_wav_file()` handles it the same way:
+
+1. It first tries to open the output stream at the wav's own rate / channel count.
+2. If that raises `OSError`, it reopens at the output device's **native** rate / channels and converts the 16-bit PCM in software via `_convert_pcm16()` — mono downmix → `scipy.signal.resample_poly` → duplicate up to the target channel count. This path logs `[System] 재생 네이티브 변환: …Hz/…ch → …Hz/…ch`.
+
+`_convert_pcm16()` only handles 16-bit PCM (all wavs in this repo are 16-bit); a non-16-bit file that the device can't open natively is skipped with a message rather than crashing. `play_wav_file()` also accepts an optional `output_device_index` (defaults to the system default output device).
 
 ### Intent handling (current behavior)
 

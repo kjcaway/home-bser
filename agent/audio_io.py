@@ -157,26 +157,81 @@ def flush_input_stream(stream):
         stream.read(CHUNK, exception_on_overflow=False)
 
 
-def play_wav_file(file_path):
-    """wav 파일을 스피커로 재생합니다."""
+def _convert_pcm16(raw, src_channels, src_rate, dst_channels, dst_rate):
+    """16-bit PCM 바이트를 대상 채널/레이트로 변환한다 (다운믹스→리샘플→업믹스)."""
+    samples = np.frombuffer(raw, dtype=np.int16)
+
+    # 다중 채널 → 모노 다운믹스
+    if src_channels > 1:
+        usable = (len(samples) // src_channels) * src_channels
+        samples = samples[:usable].reshape(-1, src_channels).mean(axis=1)
+    else:
+        samples = samples.astype(np.float64)
+
+    # 레이트 변환
+    if src_rate != dst_rate:
+        g = gcd(dst_rate, src_rate)
+        samples = resample_poly(samples, dst_rate // g, src_rate // g)
+
+    samples = np.clip(np.round(samples), -32768, 32767).astype(np.int16)
+
+    # 모노 → 대상 채널 업믹스(복제)
+    if dst_channels > 1:
+        samples = np.repeat(samples[:, None], dst_channels, axis=1).flatten()
+
+    return samples.tobytes()
+
+
+def play_wav_file(file_path, output_device_index=None):
+    """wav 파일을 스피커로 재생합니다.
+
+    출력 장치가 wav 원본 레이트를 직접 지원하지 않으면(raw hw 장치 등, -9999),
+    장치의 네이티브 레이트/채널로 열고 16-bit PCM 을 소프트웨어 변환하여 재생합니다.
+    """
     if not os.path.exists(file_path):
         print(f"❌ 재생할 파일을 찾을 수 없습니다: {file_path}")
         return
 
     print(f"🔊 응답음 재생 중: {file_path}")
     wf = wave.open(file_path, 'rb')
-    p = pyaudio.PyAudio()
-    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
-                    channels=wf.getnchannels(),
-                    rate=wf.getframerate(),
-                    output=True)
+    width = wf.getsampwidth()
+    src_channels = wf.getnchannels()
+    src_rate = wf.getframerate()
+    frames = wf.readframes(wf.getnframes())
+    wf.close()
 
-    data = wf.readframes(1024)
-    while len(data) > 0:
-        stream.write(data)
-        data = wf.readframes(1024)
+    p = pyaudio.PyAudio()
+    fmt = p.get_format_from_width(width)
+
+    # 1) wav 원본 설정으로 직접 열기 시도
+    try:
+        stream = p.open(format=fmt, channels=src_channels, rate=src_rate, output=True,
+                        output_device_index=output_device_index)
+        out_channels, out_frames = src_channels, frames
+    except OSError:
+        # 2) 폴백: 장치 네이티브 레이트/채널로 열고 소프트웨어 변환 (16-bit 만 지원)
+        if width != 2:
+            print(f"❌ 출력 장치가 {src_rate}Hz 를 지원하지 않고 16-bit 가 아니라 변환 불가")
+            p.terminate()
+            return
+        if output_device_index is not None:
+            info = p.get_device_info_by_index(output_device_index)
+        else:
+            info = p.get_default_output_device_info()
+        dst_rate = int(info["defaultSampleRate"])
+        dst_channels = 2 if int(info["maxOutputChannels"]) >= 2 else 1
+        print(f"[System] 재생 네이티브 변환: {src_rate}Hz/{src_channels}ch "
+              f"→ {dst_rate}Hz/{dst_channels}ch")
+        out_frames = _convert_pcm16(frames, src_channels, src_rate, dst_channels, dst_rate)
+        out_channels = dst_channels
+        stream = p.open(format=fmt, channels=dst_channels, rate=dst_rate, output=True,
+                        output_device_index=output_device_index)
+
+    # 청크 단위로 기록
+    step = 1024 * 2 * out_channels  # frames * bytes_per_sample(2) * channels
+    for i in range(0, len(out_frames), step):
+        stream.write(out_frames[i:i + step])
 
     stream.stop_stream()
     stream.close()
     p.terminate()
-    wf.close()
