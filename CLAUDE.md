@@ -35,6 +35,7 @@ Run standalone utilities:
 
 ```bash
 python timer.py 30s   # timer alarm; accepts "<N>m" or "<N>s" (e.g. 1m, 30s)
+python timer.py 30s --output-device 2   # play the alarm on a specific speaker index
 python text_to_wav.py --name out.wav --text "안녕하세요"   # TTS text → wav file (no playback)
 ```
 
@@ -97,7 +98,7 @@ The original design (documented in `GEMINI.md`) routed transcribed text to a loc
 
 - `check_timer_intent()` — keyword + regex heuristics to decide if the utterance is a timer/stopwatch request.
 - `extract_time_unit()` — parses Korean time expressions ("1분 30초", "10초") into a normalized `"<N>m"` / `"<N>s"` string.
-- If a timer intent with a valid time is found, `run_timer_script()` shells out via `subprocess` to `timer.py <time>`, which sleeps then speaks an alarm. Otherwise it just echoes the recognized text back via TTS.
+- If a timer intent with a valid time is found, `run_timer_script()` shells out via `subprocess` to `timer.py <time>`, which sleeps then plays an alarm. It forwards the agent's speaker index (`tts.output_device_index`) as `--output-device` so the alarm plays on the **same** speaker as the rest of the agent. Without this, the timer subprocess falls back to the system default output, which in prod (headless/nohup) is unrouted — flooding the log with ALSA/JACK fallback warnings and playing the alarm on the wrong (or no) device. Otherwise it just echoes the recognized text back via TTS.
 
 ### TTS single source
 

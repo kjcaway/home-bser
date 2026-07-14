@@ -104,7 +104,7 @@ def format_time_korean(time_arg: str) -> str:
 # ==========================================
 # 타이머 스크립트 실행 함수
 # ==========================================
-def run_timer_script(time_arg):
+def run_timer_script(time_arg, output_device_index=None):
     print(f"타이머 스크립트를 호출합니다. 설정 시간: {time_arg}")
 
     try:
@@ -112,9 +112,13 @@ def run_timer_script(time_arg):
         # subprocess.Popen으로 타이머를 자식 프로세스로 띄우고 종료를 기다리지 않습니다.
         # 이렇게 해야 설정 시간(sleep) 동안 메인 에이전트가 블록되지 않고
         # 곧바로 다음 호출어 대기 루프로 돌아갈 수 있습니다.
-        subprocess.Popen(
-            [sys.executable, "timer.py", time_arg]
-        )
+        # 출력 장치 인덱스를 함께 넘겨, 알람음이 메인 에이전트와 동일한 스피커로
+        # 재생되도록 한다. (운영환경에서 기본 출력으로 빠지면 ALSA/JACK 폴백 노이즈가
+        # 발생하고 알람이 실제 스피커로 나가지 않는 문제를 방지)
+        cmd = [sys.executable, "timer.py", time_arg]
+        if output_device_index is not None:
+            cmd += ["--output-device", str(output_device_index)]
+        subprocess.Popen(cmd)
         print("타이머 스크립트를 백그라운드로 실행했습니다.")
 
     except FileNotFoundError:
@@ -147,6 +151,8 @@ def handle(user_sentence: str, tts) -> bool:
     print(f"-> 의도 확인 완료! 추출된 시간 파라미터: {time_argument}")
 
     # Step 3: 외부 타이머 스크립트 실행
+    # 알람음이 메인 에이전트와 같은 스피커로 나가도록 출력 장치 인덱스를 전달한다.
+    output_device_index = getattr(tts, "output_device_index", None)
     tts.speak(f"{format_time_korean(time_argument)} 뒤에 알람을 실행합니다.")
-    run_timer_script(time_argument)
+    run_timer_script(time_argument, output_device_index)
     return True
