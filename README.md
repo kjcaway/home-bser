@@ -22,14 +22,36 @@ pip3 install uroman
 ## How to run
 ```bash
 # it must be executed in venv
-# --device 로 STT/TTS 실행 디바이스를 선택합니다 (cpu | cuda, 기본값: cpu)
-python main_agent.py                 # 기본 cpu
-python main_agent.py --device cuda   # GPU (CUDA) 사용
-python main_agent.py --device cpu    # 명시적 cpu 사용
+# --environment 로 실행 환경 프리셋을 선택합니다 (dev | prod, 기본값: dev)
+python main_agent.py                    # 기본 dev (cpu, mic 0)
+python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
+python main_agent.py --environment prod # 운영환경: cuda GPU, mic index 1
 ```
-- `cuda` 는 NVIDIA GPU + CUDA 환경에서만 동작합니다. CUDA 미가용 상태에서 `--device cuda` 를 주면 에러가 발생합니다.
-- 프로그램 로드 시 선택된 디바이스가 로그로 출력됩니다. (예: `[System] 실행 디바이스: cpu (STT compute_type: int8)`)
+- `--environment` 프리셋은 STT/TTS 실행 디바이스와 마이크 입력 인덱스를 함께 결정합니다.
+  - `dev` — `device=cpu`, `input-device=0`
+  - `prod` — `device=cuda`, `input-device=1`
+- `prod`(cuda) 는 NVIDIA GPU + CUDA 환경에서만 동작합니다. CUDA 미가용 상태에서 `prod` 를 주면 에러가 발생합니다. (자동 CPU 폴백 없음)
+- 프로그램 로드 시 선택된 환경이 로그로 출력됩니다. (예: `[System] 실행 환경: ...`)
 - STT(Faster-Whisper) compute_type 은 디바이스에 따라 자동 설정됩니다. (cuda: float16, cpu: int8)
+
+## How to run in production (상시 실행)
+SSH 연결이 닫혀도 프로세스가 종료되지 않도록 `nohup` 으로 백그라운드 실행합니다.
+`SIGHUP` 을 무시하고 실행되며, 출력은 `agent.log` 로 남습니다.
+
+```bash
+# it must be executed in venv
+cd /Users/jckang/workspace_vscode/home-bser
+nohup ./bin/python main_agent.py --environment prod > agent.log 2>&1 &
+```
+- `res0.wav`(호출어 응답음) 접근을 위해 반드시 프로젝트 루트에서 실행하세요.
+- `./bin/python` 을 직접 지정하면 `source bin/activate` 없이 venv 로 동작합니다.
+
+```bash
+tail -f agent.log       # 실시간 로그 확인
+pgrep -af main_agent.py # 실행 중인 프로세스 확인
+pkill -f main_agent.py  # 프로세스 종료
+```
+- 자동 재시작·부팅 시 자동 시작이 필요하면 `systemd user service` 사용을 권장합니다.
 
 ### How to make requirements
 ```
