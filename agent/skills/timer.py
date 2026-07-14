@@ -109,15 +109,14 @@ def run_timer_script(time_arg):
 
     try:
         # sys.executable은 현재 실행 중인 파이썬 인터프리터 경로를 자동으로 가져옵니다. (예: python, python3)
-        # subprocess.run을 통해 외부 스크립트를 실행하고 종료될 때까지 기다립니다.
-        subprocess.run(
-            [sys.executable, "timer.py", time_arg],
-            check=True
+        # subprocess.Popen으로 타이머를 자식 프로세스로 띄우고 종료를 기다리지 않습니다.
+        # 이렇게 해야 설정 시간(sleep) 동안 메인 에이전트가 블록되지 않고
+        # 곧바로 다음 호출어 대기 루프로 돌아갈 수 있습니다.
+        subprocess.Popen(
+            [sys.executable, "timer.py", time_arg]
         )
-        print("타이머 스크립트가 성공적으로 종료되었습니다.")
+        print("타이머 스크립트를 백그라운드로 실행했습니다.")
 
-    except subprocess.CalledProcessError as e:
-        print(f"스크립트 실행 중 오류가 발생했습니다. 종료 코드: {e.returncode}")
     except FileNotFoundError:
         print("timer.py 파일을 찾을 수 없습니다. 같은 폴더에 있는지 확인해주세요.")
 
