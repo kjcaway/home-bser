@@ -37,14 +37,14 @@ pip3 install uroman
 # --environment 로 실행 환경 프리셋을 선택합니다 (dev | prod, 기본값: dev)
 python main_agent.py                    # 기본 dev (cpu, mic 0)
 python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
-python main_agent.py --environment prod # 운영환경: cuda GPU, mic index 1
+python main_agent.py --environment prod # 운영환경: cpu STT/TTS, mic index 2
 ```
 - `--environment` 프리셋은 STT/TTS 실행 디바이스와 마이크 입력 인덱스를 함께 결정합니다.
   - `dev` — `device=cpu`, `input-device=0`
-  - `prod` — `device=cuda`, `input-device=1`
-- `prod`(cuda) 는 NVIDIA GPU + CUDA 환경에서만 동작합니다. CUDA 미가용 상태에서 `prod` 를 주면 에러가 발생합니다. (자동 CPU 폴백 없음)
+  - `prod` — `device=cpu`, `input-device=2`
+- STT/TTS 는 모든 환경에서 CPU 로 동작합니다. GPU(cuda) 는 추후 로컬 LLM 스테이지 전용으로 남겨둡니다.
 - 프로그램 로드 시 선택된 환경이 로그로 출력됩니다. (예: `[System] 실행 환경: ...`)
-- STT(Faster-Whisper) compute_type 은 디바이스에 따라 자동 설정됩니다. (cuda: float16, cpu: int8)
+- STT(Faster-Whisper) compute_type 은 디바이스에 따라 자동 설정됩니다. (cuda: float16, cpu: int8) — 현재는 두 프리셋 모두 cpu 이므로 항상 int8.
 
 ## How to run in production (상시 실행)
 SSH 연결이 닫혀도 프로세스가 종료되지 않도록 `nohup` 으로 백그라운드 실행합니다.

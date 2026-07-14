@@ -21,15 +21,15 @@ Run the full agent (needs a mic and speaker; environment selected via `--environ
 ```bash
 python main_agent.py                    # default: dev
 python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
-python main_agent.py --environment prod # 운영환경: cuda GPU, mic index 1
+python main_agent.py --environment prod # 운영환경: cpu STT/TTS, mic index 2
 ```
 
 `--environment` (choices `dev`/`prod`, **default `dev`**) is parsed with `argparse` and selects a preset that drives both the compute device and the microphone. Presets live in the `ENVIRONMENTS` dict in `agent/config.py`:
 
 - `dev` — `device=cpu`, `input-device=0` (개발환경)
-- `prod` — `device=cuda`, `input-device=1` (운영환경)
+- `prod` — `device=cpu`, `input-device=2` (운영환경)
 
-The selected environment is logged at startup (`[System] 실행 환경: ...`). STT `compute_type` is derived from the device automatically — `float16` for cuda, `int8` for cpu (faster-whisper does not support `float16` on CPU). Selecting `prod` without a working CUDA setup raises an error; there is no automatic CPU fallback. The mic index is passed to `open_input_stream(device_index)`; if opening fails, the available input devices are listed to aid diagnosis.
+STT/TTS both run on CPU in every environment: CPU was judged the better fit for these stages. GPU (cuda) is intentionally left unused for now, reserved for a future local LLM stage — when that stage lands it will get its own device setting. The selected environment is logged at startup (`[System] 실행 환경: ...`). STT `compute_type` is derived from the device automatically — `float16` for cuda, `int8` for cpu (faster-whisper does not support `float16` on CPU); since both presets are cpu, this is currently always `int8`. The mic index is passed to `open_input_stream(device_index)`; if opening fails, the available input devices are listed to aid diagnosis.
 
 Run standalone utilities:
 
@@ -105,7 +105,7 @@ The original design (documented in `GEMINI.md`) routed transcribed text to a loc
 
 ## Environment assumptions
 
-- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives both the compute device (STT/TTS) and the mic input index (`dev`=cpu/mic 0, `prod`=cuda/mic 1). `timer.py` auto-detects (`cuda` if available, else `cpu`).
+- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives both the compute device (STT/TTS) and the mic input index (`dev`=cpu/mic 0, `prod`=cpu/mic 2). Both presets run STT/TTS on cpu; cuda is reserved for a future local LLM. `timer.py` auto-detects (`cuda` if available, else `cpu`).
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
 - Code comments, prompts, and print output are in Korean.
