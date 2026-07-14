@@ -55,8 +55,9 @@ def normalize_numbers(text):
 class TextToSpeech:
     """MMS-VITS 한국어 TTS 엔진. 모델을 1회 로드한 뒤 재사용합니다."""
 
-    def __init__(self, device, model_name="facebook/mms-tts-kor"):
+    def __init__(self, device, model_name="facebook/mms-tts-kor", output_device_index=None):
         self.device = device
+        self.output_device_index = output_device_index
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = VitsModel.from_pretrained(model_name).to(device)
 
@@ -82,4 +83,4 @@ class TextToSpeech:
         """텍스트를 음성으로 변환한 뒤 스피커로 재생합니다."""
         print("🗣️ 답변을 음성으로 변환 중...")
         output_path = self.synthesize_to_file(text)
-        play_wav_file(output_path)
+        play_wav_file(output_path, self.output_device_index)

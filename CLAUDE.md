@@ -42,8 +42,15 @@ Install dependencies (see `README.md` for the full list):
 
 ```bash
 pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman
-pip3 install nvidia-cublas-cu12 nvidia-cudnn-cu12
+pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
 ```
+
+**cuDNN 버전 핀 필수**: `nvidia-cudnn-cu12` 는 torch 가 빌드된 cuDNN 버전과 일치해야 한다.
+torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 버전(예: 9.24)을
+설치하면 STT(faster-whisper)는 통과하지만 TTS(VITS conv1d) 실행 시
+`RuntimeError: CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH` 로 죽는다. 요구 버전은
+`python -c "import importlib.metadata as m; print([r for r in m.requires('torch') if 'cudnn' in r.lower()])"`
+로 확인해 핀을 맞춘다.
 
 ## Architecture
 

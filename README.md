@@ -13,11 +13,23 @@ python3 -m venv .
 ```bash
 # it must be executed in venv
 pip3 install pyaudio numpy openwakeword faster-whisper
-pip3 install nvidia-cublas-cu12 nvidia-cudnn-cu12
+pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
 pip3 install requests
 pip3 install torch transformers scipy
 pip3 install uroman
 ```
+
+> **cuDNN 버전 핀 주의**
+> `nvidia-cudnn-cu12` 는 반드시 **torch 가 빌드된 cuDNN 버전과 일치**해야 합니다.
+> 버전을 고정하지 않고 최신을 받으면 torch(예: cuDNN 9.20)와 pip 런타임(예: 9.24)이
+> 어긋나 TTS(conv1d) 실행 시 `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH` 로 죽습니다.
+> torch 가 요구하는 버전은 아래로 확인하고 핀을 맞추세요.
+> ```bash
+> # torch 가 빌드된 cuDNN 버전 (예: 92000 = 9.20.0)
+> python -c "import torch; print(torch.backends.cudnn.version())"
+> # torch 가 의존성으로 요구하는 정확한 핀
+> python -c "import importlib.metadata as m; print([r for r in m.requires('torch') if 'cudnn' in r.lower()])"
+> ```
 
 ## How to run
 ```bash
@@ -91,7 +103,8 @@ requests
 # CPU/macOS 머신에서는 설치하지 마세요. 필요 시 주석 해제.
 # =========================================================
 # nvidia-cublas-cu12
-# nvidia-cudnn-cu12
+# nvidia-cudnn-cu12==9.20.*   # ★ torch 빌드 cuDNN 버전과 반드시 일치시킬 것
+#                            #   (불일치 시 TTS 에서 CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH)
 #
 # 참고: torch 를 CUDA 빌드로 설치하려면 버전 태그(예: torch==2.x.x+cu121)를
 #       실제 운영 머신의 pip3 freeze 결과에서 그대로 복사해 위 torch 라인에 반영하세요.

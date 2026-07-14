@@ -116,6 +116,26 @@ def list_input_devices(audio):
         print("    (입력 가능한 장치를 찾지 못했습니다. 마이크 연결/권한을 확인하세요.)")
 
 
+def list_output_devices(audio):
+    """사용 가능한 출력(스피커) 장치 목록을 출력합니다."""
+    print("[System] 사용 가능한 출력 장치 목록:")
+    try:
+        default_index = audio.get_default_output_device_info().get("index")
+    except OSError:
+        default_index = None
+    found = False
+    for i in range(audio.get_device_count()):
+        info = audio.get_device_info_by_index(i)
+        if int(info.get("maxOutputChannels", 0)) > 0:
+            found = True
+            mark = " (기본)" if i == default_index else ""
+            print(f"    [{i}] {info['name']} "
+                  f"(채널 {int(info['maxOutputChannels'])}, "
+                  f"기본 {int(info['defaultSampleRate'])}Hz){mark}")
+    if not found:
+        print("    (출력 가능한 장치를 찾지 못했습니다. 스피커 연결/권한을 확인하세요.)")
+
+
 def open_input_stream(device_index=None):
     """마이크 입력 스트림을 열고 (PyAudio 인스턴스, 스트림) 을 반환합니다.
 

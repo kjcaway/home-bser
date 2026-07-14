@@ -11,7 +11,10 @@ from agent.audio_io import (
     record_frames,
     play_wav_file,
     flush_input_stream,
+    list_input_devices,
+    list_output_devices,
 )
+import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
 from agent.tts import TextToSpeech
@@ -52,7 +55,15 @@ def main():
     # ==========================================
     # 1. 환경 설정 (--device 인자 파싱)
     # ==========================================
-    device, stt_compute_type, input_device_index = parse_device_args()
+    device, stt_compute_type, input_device_index, output_device_index, list_devices = parse_device_args()
+
+    # --list-devices: 입출력 장치 목록만 출력하고 종료 (마이크/스피커 인덱스 확인용)
+    if list_devices:
+        audio = pyaudio.PyAudio()
+        list_input_devices(audio)
+        list_output_devices(audio)
+        audio.terminate()
+        return
 
     # ==========================================
     # 2. 모든 로컬 모델 로드 (Wake Word, STT, TTS)
@@ -61,7 +72,7 @@ def main():
 
     oww_model = load_wakeword_model("alexa")
     whisper_model = load_stt_model(device, stt_compute_type)
-    tts = TextToSpeech(device)
+    tts = TextToSpeech(device, output_device_index=output_device_index)
 
     print("[System] 모델 로드 완료! 에이전트가 준비되었습니다.")
 
@@ -85,7 +96,7 @@ def main():
                 print("\n🔔 [Wake Word 감지!] 👂 듣고 있습니다...")
 
                 # 호출 성공을 사용자에게 알리는 응답음 재생 (녹음 시작 전)
-                play_wav_file(WAKE_RESPONSE_FILE)
+                play_wav_file(WAKE_RESPONSE_FILE, output_device_index)
 
                 # STT 녹음 및 변환
                 pcm_bytes = record_frames(stream, RECORD_SECONDS)
