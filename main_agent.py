@@ -13,6 +13,7 @@ from agent.audio_io import (
     flush_input_stream,
     list_input_devices,
     list_output_devices,
+    resolve_devices,
 )
 import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
@@ -58,17 +59,24 @@ def execute_command(user_text, tts):
 
 def main():
     # ==========================================
-    # 1. 환경 설정 (--device 인자 파싱)
+    # 1. 환경 설정 (--environment 인자 파싱)
     # ==========================================
-    device, stt_compute_type, input_device_index, output_device_index, list_devices = parse_device_args()
+    cfg = parse_device_args()
 
-    # --list-devices: 입출력 장치 목록만 출력하고 종료 (마이크/스피커 인덱스 확인용)
-    if list_devices:
+    # --list-devices: 입출력 장치 목록만 출력하고 종료 (마이크/스피커 이름 확인용)
+    if cfg.list_devices:
         audio = pyaudio.PyAudio()
         list_input_devices(audio)
         list_output_devices(audio)
         audio.terminate()
         return
+
+    # 장치 이름 → 인덱스 해석. USB 장치의 PyAudio 인덱스는 연결/부팅마다 바뀌므로
+    # 프리셋의 이름 패턴으로 매번 새로 찾는다 (이름이 없으면 프리셋 인덱스 폴백).
+    input_device_index, output_device_index = resolve_devices(
+        cfg.input_device_name, cfg.input_device_index,
+        cfg.output_device_name, cfg.output_device_index,
+    )
 
     # ==========================================
     # 2. 모든 로컬 모델 로드 (Wake Word, STT, TTS)
@@ -76,8 +84,8 @@ def main():
     print("[System] 모든 로컬 AI 모델을 불러오는 중입니다. 잠시만 기다려주세요...")
 
     oww_model = load_wakeword_model("alexa")
-    whisper_model = load_stt_model(device, stt_compute_type)
-    tts = TextToSpeech(device, output_device_index=output_device_index)
+    whisper_model = load_stt_model(cfg.device, cfg.stt_compute_type)
+    tts = TextToSpeech(cfg.device, output_device_index=output_device_index)
 
     print("[System] 모델 로드 완료! 에이전트가 준비되었습니다.")
 

@@ -21,15 +21,26 @@ Run the full agent (needs a mic and speaker; environment selected via `--environ
 ```bash
 python main_agent.py                    # default: dev
 python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
-python main_agent.py --environment prod # 운영환경: cpu STT/TTS, mic index 2
+python main_agent.py --environment prod # 운영환경: cpu STT/TTS, USB 장치를 이름으로 탐색
+python main_agent.py --list-devices     # 입출력 장치 이름/인덱스 확인
 ```
 
-`--environment` (choices `dev`/`prod`, **default `dev`**) is parsed with `argparse` and selects a preset that drives both the compute device and the microphone. Presets live in the `ENVIRONMENTS` dict in `agent/config.py`:
+`--environment` (choices `dev`/`prod`, **default `dev`**) is parsed with `argparse` and selects a preset that drives the compute device, the microphone, and the speaker. Presets live in the `ENVIRONMENTS` dict in `agent/config.py`:
 
-- `dev` — `device=cpu`, `input-device=0` (개발환경)
-- `prod` — `device=cpu`, `input-device=2` (운영환경)
+- `dev` — `device=cpu`, mic index `0`, 기본 스피커 (개발환경)
+- `prod` — `device=cpu`, mic/speaker matched by **name** (`"USB"`) (운영환경)
 
-STT/TTS both run on CPU in every environment: CPU was judged the better fit for these stages. GPU (cuda) is intentionally left unused for now, reserved for a future local LLM stage — when that stage lands it will get its own device setting. The selected environment is logged at startup (`[System] 실행 환경: ...`). STT `compute_type` is derived from the device automatically — `float16` for cuda, `int8` for cpu (faster-whisper does not support `float16` on CPU); since both presets are cpu, this is currently always `int8`. The mic index is passed to `open_input_stream(device_index)`; if opening fails, the available input devices are listed to aid diagnosis.
+STT/TTS both run on CPU in every environment: CPU was judged the better fit for these stages. GPU (cuda) is intentionally left unused for now, reserved for a future local LLM stage — when that stage lands it will get its own device setting. The selected environment is logged at startup (`[System] 실행 환경: ...`). STT `compute_type` is derived from the device automatically — `float16` for cuda, `int8` for cpu (faster-whisper does not support `float16` on CPU); since both presets are cpu, this is currently always `int8`.
+
+### Device selection (why by name, not index)
+
+PortAudio assigns device indices in enumeration order, so a USB mic/speaker's index **changes across reboots and re-plugs** — a hardcoded `2` breaks. Presets therefore carry `input_device_name` / `output_device_name`: a case-insensitive **substring** of the device name, resolved to a live index at startup by `resolve_devices()` in `agent/audio_io.py` (called once in `main()`, before models load).
+
+- No name (dev) → the preset's `input_device_index` / `output_device_index` is used as-is.
+- Name matches → that index is used, and the match is logged. Multiple matches → the first is picked and the rest are logged.
+- Name matches nothing → warns, prints the device list, and falls back to the preset index (`None` = system default), so a missing USB device degrades instead of crashing.
+
+Patterns are overridable via `.env` (`AUDIO_INPUT_NAME`, `AUDIO_OUTPUT_NAME`) so prod devices can change without touching code; an empty value falls back to the preset. Run `--list-devices` on the target machine to see the real names. The resolved index is passed to `open_input_stream(device_index)`; if opening still fails, the available input devices are listed to aid diagnosis.
 
 Run standalone utilities:
 
@@ -57,8 +68,8 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
-- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`.
+- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
@@ -120,7 +131,7 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 
 ## Environment assumptions
 
-- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives both the compute device (STT/TTS) and the mic input index (`dev`=cpu/mic 0, `prod`=cpu/mic 2). Both presets run STT/TTS on cpu; the GPU belongs to hermes (the LLM), which runs as a separate server process rather than in-process. `timer.py` auto-detects (`cuda` if available, else `cpu`).
+- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives the compute device (STT/TTS) and the audio devices (`dev`=cpu/mic index 0, `prod`=cpu/USB devices matched by name — see "Device selection" above). Both presets run STT/TTS on cpu; the GPU belongs to hermes (the LLM), which runs as a separate server process rather than in-process. `timer.py` auto-detects (`cuda` if available, else `cpu`).
 - **The agent is no longer 100% offline when hermes is enabled** — but hermes runs locally (127.0.0.1), so no cloud APIs are involved and the offline property holds at the network boundary.
 - The LLM stage is gated by the presence of a `.env` with `HERMES_API_KEY`, not by `--environment`. In practice that means prod-only, since dev has no `.env`.
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
@@ -131,5 +142,5 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 
 - `README.md` — venv + pip setup.
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
-- `.env.example` — template for the git-ignored `.env` (hermes settings).
+- `.env.example` — template for the git-ignored `.env` (hermes settings, audio device name patterns).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).

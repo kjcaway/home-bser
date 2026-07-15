@@ -136,6 +136,75 @@ def list_output_devices(audio):
         print("    (출력 가능한 장치를 찾지 못했습니다. 스피커 연결/권한을 확인하세요.)")
 
 
+def find_device_by_name(audio, name_pattern, kind="input"):
+    """이름에 name_pattern 이 포함된 첫 번째 입/출력 장치의 인덱스를 반환한다.
+
+    USB 장치의 PyAudio 인덱스는 연결 순서/부팅마다 바뀌므로 인덱스를 고정값으로
+    쓸 수 없다. 반면 장치 이름은 하드웨어에 따라오므로 이름으로 찾는다.
+    대소문자를 무시한 부분일치이며, 못 찾으면 None 을 반환한다.
+    """
+    channel_key = "maxInputChannels" if kind == "input" else "maxOutputChannels"
+    needle = name_pattern.lower()
+
+    matches = []
+    for i in range(audio.get_device_count()):
+        info = audio.get_device_info_by_index(i)
+        if int(info.get(channel_key, 0)) <= 0:
+            continue
+        if needle in str(info["name"]).lower():
+            matches.append((i, info["name"]))
+
+    if not matches:
+        return None
+
+    index, name = matches[0]
+    label = "입력" if kind == "input" else "출력"
+    if len(matches) > 1:
+        others = ", ".join(f"[{i}] {n}" for i, n in matches[1:])
+        print(f"[System] {label} 장치 이름 '{name_pattern}' 에 여러 장치가 일치합니다 "
+              f"(선택: [{index}] {name} / 나머지: {others})")
+    else:
+        print(f"[System] {label} 장치 이름 '{name_pattern}' → [{index}] {name}")
+    return index
+
+
+def resolve_device_index(audio, name_pattern, fallback_index, kind="input"):
+    """이름 패턴으로 장치 인덱스를 해석하고, 실패하면 fallback_index 를 쓴다.
+
+    name_pattern 이 없으면 곧바로 fallback_index 를 반환한다. 패턴이 있는데
+    일치하는 장치가 없으면 장치 목록을 출력해 진단을 돕고 fallback 으로 넘어간다.
+    """
+    if not name_pattern:
+        return fallback_index
+
+    index = find_device_by_name(audio, name_pattern, kind)
+    if index is not None:
+        return index
+
+    label = "입력(마이크)" if kind == "input" else "출력(스피커)"
+    print(f"⚠️  {label} 장치 이름 '{name_pattern}' 과 일치하는 장치를 찾지 못했습니다. "
+          f"→ {'인덱스 ' + str(fallback_index) if fallback_index is not None else '시스템 기본 장치'} 사용")
+    if kind == "input":
+        list_input_devices(audio)
+    else:
+        list_output_devices(audio)
+    return fallback_index
+
+
+def resolve_devices(input_name, input_fallback, output_name, output_fallback):
+    """마이크/스피커 인덱스를 이름 기준으로 해석해 (input_index, output_index) 반환.
+
+    스트림을 열기 전에 한 번만 호출하며, 해석용 PyAudio 인스턴스는 즉시 정리한다.
+    """
+    audio = pyaudio.PyAudio()
+    try:
+        input_index = resolve_device_index(audio, input_name, input_fallback, "input")
+        output_index = resolve_device_index(audio, output_name, output_fallback, "output")
+    finally:
+        audio.terminate()
+    return input_index, output_index
+
+
 def open_input_stream(device_index=None):
     """마이크 입력 스트림을 열고 (PyAudio 인스턴스, 스트림) 을 반환합니다.
 
@@ -151,8 +220,8 @@ def open_input_stream(device_index=None):
         print(f"   (요청 설정: {RATE}Hz / {CHANNELS}채널 / 16-bit, "
               f"장치 인덱스: {device_index if device_index is not None else '기본'})")
         list_input_devices(audio)
-        print("   → 실행 환경 프리셋(agent/config.py ENVIRONMENTS)의 "
-              "input_device_index 를 위 목록의 장치로 지정해 다시 실행하세요.")
+        print("   → 위 목록에서 쓸 장치의 이름을 골라 .env 의 AUDIO_INPUT_NAME "
+              "(또는 agent/config.py ENVIRONMENTS 의 input_device_name)에 지정해 다시 실행하세요.")
         audio.terminate()
         raise
     return audio, stream
