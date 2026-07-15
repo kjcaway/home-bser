@@ -11,3 +11,6 @@ __pycache__/
 
 # TTS runtime output
 response.wav
+
+# 로컬 환경변수 (API 키 등). 템플릿은 .env.example 참고
+.env

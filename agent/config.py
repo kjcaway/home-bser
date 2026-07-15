@@ -1,5 +1,11 @@
 import argparse
+import os
+from pathlib import Path
+
 import pyaudio
+
+# 프로젝트 루트(= venv 루트). agent/config.py 기준 한 단계 위.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # ==========================================
 # 오디오 및 파일 설정 상수
@@ -30,6 +36,47 @@ ENVIRONMENTS = {
     "prod": {"device": "cpu", "input_device_index": 2, "output_device_index": 2},
     "dev": {"device": "cpu", "input_device_index": 0, "output_device_index": None},
 }
+
+
+# ==========================================
+# .env 로더
+# ==========================================
+# API 키 같은 비밀값은 git 에 올리지 않고 프로젝트 루트의 .env 파일로 관리한다.
+# python-dotenv 의존성을 추가하지 않기 위해 필요한 최소 문법만 직접 파싱한다.
+#   - KEY=VALUE 한 줄에 하나
+#   - '#' 로 시작하는 줄과 빈 줄은 무시
+#   - 값을 감싼 홑/겹따옴표는 제거
+#   - 이미 os.environ 에 있는 값은 덮어쓰지 않는다 (실제 환경변수가 항상 우선)
+_env_loaded = False
+
+
+def load_env_file(path=None):
+    """프로젝트 루트의 .env 파일을 읽어 os.environ 에 채운다.
+
+    여러 번 호출해도 실제 파싱은 한 번만 수행한다. 파일이 없으면 조용히 넘어간다
+    (개발환경처럼 .env 를 두지 않는 경우가 정상 동작이기 때문).
+    """
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+
+    env_path = Path(path) if path else PROJECT_ROOT / ".env"
+    if not env_path.is_file():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # 값을 감싼 따옴표 제거 (예: KEY="my value")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def parse_device_args():

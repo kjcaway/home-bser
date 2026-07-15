@@ -52,7 +52,7 @@ def main():
 
     # hermes 는 인증을 요구하지 않지만 SDK 가 api_key 를 필수로 요구하므로 더미 값을 넣는다.
     # 연결 실패를 바로 알 수 있도록 SDK 기본 재시도(2회)는 끈다.
-    client = OpenAI(base_url=args.base_url, api_key="hermes",
+    client = OpenAI(base_url=args.base_url, api_key="qqqqqqqqqqqqqqqq1",
                     timeout=args.timeout, max_retries=0)
 
     print(f"[System] hermes gateway: {args.base_url} (model: {args.model})")

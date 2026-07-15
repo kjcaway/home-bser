@@ -18,7 +18,7 @@ import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
 from agent.tts import TextToSpeech
-from agent.skills import timer
+from agent.skills import timer, hermes_api
 
 
 # ==========================================
@@ -27,8 +27,13 @@ from agent.skills import timer
 # 각 스킬은 handle(user_text, tts) -> bool 규약을 따른다.
 # 자신이 처리할 명령이면 수행 후 True, 아니면 False 를 반환한다.
 # 새 기능 추가 = handle 함수를 작성해 이 리스트에 등록하면 끝. (아래 루프는 그대로)
+#
+# 순서가 중요하다: hermes_api 는 문장을 가리지 않고 받는 catch-all 스킬이므로
+# 반드시 마지막에 둔다. (.env 에 hermes 설정이 없으면 스스로 False 를 반환해
+# 아래 에코 폴백으로 넘어간다)
 SKILLS = [
     timer.handle,
+    hermes_api.handle,
 ]
 
 

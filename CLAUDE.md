@@ -42,7 +42,7 @@ python text_to_wav.py --name out.wav --text "안녕하세요"   # TTS text → w
 Install dependencies (see `README.md` for the full list):
 
 ```bash
-pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman
+pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman openai
 pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
 ```
 
@@ -57,14 +57,16 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
-- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, and `parse_device_args()` (the `--environment` argparse logic; returns `(device, stt_compute_type, input_device_index)`).
+- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
 - `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
-- `agent/intent.py` — `check_timer_intent()`, `extract_time_unit()`, `run_timer_script()`, `process_user_command()`.
+- `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
+  - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
+  - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask()`, `strip_think()`.
 
-Models are loaded once inside `main()` (not at import time), so other scripts can import individual `agent` modules without pulling in the whole pipeline. `agent/intent.py` does not load any model itself — `process_user_command(user_text, tts)` receives the `TextToSpeech` instance from the caller.
+Models are loaded once inside `main()` (not at import time), so other scripts can import individual `agent` modules without pulling in the whole pipeline. Skills load no models themselves — `handle(user_text, tts)` receives the `TextToSpeech` instance from the caller.
 
 `main_agent.py` runs an infinite loop:
 
@@ -94,11 +96,23 @@ Playback has the mirror-image problem: the wav files (`res0.wav`, the TTS `respo
 
 ### Intent handling (current behavior)
 
-The original design (documented in `GEMINI.md`) routed transcribed text to a local **Ollama** LLM (`qwen3:14b`). That LLM code has been **removed** pending a redesign; a future LLM stage would plug in where `process_user_command()` is called (after `user_text` is obtained). The active flow is timer-focused:
+`main_agent.py` holds a `SKILLS` registry — a list of `handle(user_text, tts) -> bool` functions. `execute_command()` walks the list in order and stops at the first skill that returns `True` (meaning "I handled this"). Adding a feature = write a `handle` function and register it. **Order matters**: `hermes_api.handle` is a catch-all and must stay last. If no skill handles the utterance, the fallback echoes the recognized text via TTS.
+
+The original design (documented in `GEMINI.md`) routed transcribed text to a local **Ollama** LLM (`qwen3:14b`). That was replaced by the hermes gateway skill below.
+
+**timer skill** (`agent/skills/timer.py`):
 
 - `check_timer_intent()` — keyword + regex heuristics to decide if the utterance is a timer/stopwatch request.
 - `extract_time_unit()` — parses Korean time expressions ("1분 30초", "10초") into a normalized `"<N>m"` / `"<N>s"` string.
-- If a timer intent with a valid time is found, `run_timer_script()` shells out via `subprocess` to `timer.py <time>`, which sleeps then plays an alarm. It forwards the agent's speaker index (`tts.output_device_index`) as `--output-device` so the alarm plays on the **same** speaker as the rest of the agent. Without this, the timer subprocess falls back to the system default output, which in prod (headless/nohup) is unrouted — flooding the log with ALSA/JACK fallback warnings and playing the alarm on the wrong (or no) device. Otherwise it just echoes the recognized text back via TTS.
+- If a timer intent with a valid time is found, `run_timer_script()` shells out via `subprocess` to `timer.py <time>`, which sleeps then plays an alarm. It forwards the agent's speaker index (`tts.output_device_index`) as `--output-device` so the alarm plays on the **same** speaker as the rest of the agent. Without this, the timer subprocess falls back to the system default output, which in prod (headless/nohup) is unrouted — flooding the log with ALSA/JACK fallback warnings and playing the alarm on the wrong (or no) device.
+
+### LLM stage (hermes gateway)
+
+`agent/skills/hermes_api.py` sends any utterance no other skill claimed to a **hermes gateway** OpenAI-compatible server (`hermes gateway`, port 8642, model `qwen3:8b`) and speaks the reply. It calls the `openai` SDK with only `base_url` swapped; `max_retries=0` so a dead gateway fails fast instead of stalling the voice turn. qwen3 can emit `<think>…</think>` blocks even with thinking disabled, so `strip_think()` removes them before TTS, and the system prompt demands one or two short plain-text Korean sentences (the answer is read aloud).
+
+Config comes from a **git-ignored `.env`** in the project root — copy `.env.example` and fill it in. `load_env_file()` in `agent/config.py` parses it with the stdlib (no `python-dotenv` dependency): `KEY=VALUE` per line, `#` comments and blank lines skipped, surrounding quotes stripped, and **real environment variables always win** over `.env` values. Keys: `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_TIMEOUT`.
+
+`HERMES_API_KEY` doubles as the **on/off switch**: hermes itself needs no auth, but the OpenAI SDK requires the field, and `is_enabled()` keys off it. With no `.env` the skill returns `False` and the echo fallback runs — so **dev works unchanged without a hermes server**, and prod enables the LLM by dropping in a `.env`. If the call fails or returns an empty body, the skill speaks a short apology and returns `True` (an echo would be confusing for what was clearly a question).
 
 ### TTS single source
 
@@ -106,7 +120,9 @@ The original design (documented in `GEMINI.md`) routed transcribed text to a loc
 
 ## Environment assumptions
 
-- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives both the compute device (STT/TTS) and the mic input index (`dev`=cpu/mic 0, `prod`=cpu/mic 2). Both presets run STT/TTS on cpu; cuda is reserved for a future local LLM. `timer.py` auto-detects (`cuda` if available, else `cpu`).
+- **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives both the compute device (STT/TTS) and the mic input index (`dev`=cpu/mic 0, `prod`=cpu/mic 2). Both presets run STT/TTS on cpu; the GPU belongs to hermes (the LLM), which runs as a separate server process rather than in-process. `timer.py` auto-detects (`cuda` if available, else `cpu`).
+- **The agent is no longer 100% offline when hermes is enabled** — but hermes runs locally (127.0.0.1), so no cloud APIs are involved and the offline property holds at the network boundary.
+- The LLM stage is gated by the presence of a `.env` with `HERMES_API_KEY`, not by `--environment`. In practice that means prod-only, since dev has no `.env`.
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
 - Code comments, prompts, and print output are in Korean.
@@ -114,4 +130,6 @@ The original design (documented in `GEMINI.md`) routed transcribed text to a loc
 ## Docs
 
 - `README.md` — venv + pip setup.
-- `GEMINI.md` — original project design doc (Korean). Describes the intended LLM-in-the-loop pipeline, which differs from the current timer-only `main_agent.py`.
+- `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
+- `.env.example` — template for the git-ignored `.env` (hermes settings).
+- `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
