@@ -111,6 +111,11 @@ def main():
                 # 호출 성공을 사용자에게 알리는 응답음 재생 (녹음 시작 전)
                 play_wav_file(WAKE_RESPONSE_FILE, output_device_index)
 
+                # 응답음 재생(블로킹) 동안에도 마이크 스트림은 계속 돌아 링버퍼에 쌓인다.
+                # 비우지 않으면 record_frames 가 그 오래된 오디오부터 읽어 녹음 창이
+                # 앞으로 밀리고(= 응답음이 녹음되고) 사용자 말끝이 잘린다.
+                flush_input_stream(stream)
+
                 # STT 녹음 및 변환
                 pcm_bytes = record_frames(stream, RECORD_SECONDS)
 
