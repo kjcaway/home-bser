@@ -2,6 +2,69 @@
 home agent mini-project
 
 
+# Architecture
+
+`main_agent.py` 는 얇은 오케스트레이터입니다. 마이크 입력을 받아 **호출어 감지 → 응답음 → 녹음 → STT → 명령 처리(스킬) → 대기** 순서로 한 턴을 처리하고, 이를 무한히 반복합니다. 각 파이프라인 단계는 `agent/` 패키지의 모듈로 분리되어 있고, `main_agent.py` 는 이들을 연결만 합니다.
+
+## 파이프라인 (메인 루프)
+
+```mermaid
+flowchart TD
+    MIC([🎙️ 마이크 스트림<br/>16kHz mono int16]) --> WAKE
+
+    subgraph LOOP["main() 무한 루프 · 한 턴"]
+        direction TB
+        WAKE{"① 호출어 감지<br/>get_score 'alexa'<br/>score &gt; 0.5 ?"}
+        WAKE -->|아니오| WAKE
+        WAKE -->|예| ACK["② 응답음 재생<br/>play_wav_file(res0.wav)<br/>= '듣고 있어요' 신호"]
+        ACK --> FLUSH["버퍼 비우기<br/>flush_input_stream<br/>(응답음 녹음 방지)"]
+        FLUSH --> REC["③ 녹음<br/>record_frames(5s)<br/>+ stream.stop_stream"]
+        REC --> STT["④ STT<br/>transcribe_pcm<br/>faster-whisper (한국어)"]
+        STT --> EXEC["⑤ 명령 처리<br/>execute_command(user_text, tts)"]
+        EXEC --> RESET["대기 복귀<br/>start_stream + flush<br/>+ reset_wakeword_state"]
+        RESET --> WAKE
+    end
+
+    EXEC -.호출.-> DISPATCH
+```
+
+## 명령 처리 = 스킬 디스패처
+
+`execute_command()` 는 `SKILLS` 레지스트리를 **순서대로** 순회하며, 각 스킬의 `handle(user_text, tts) -> bool` 을 호출합니다. `True`(= 내가 처리함)를 반환하는 첫 스킬에서 멈춥니다. **순서가 중요**합니다 — `hermes_api` 는 문장을 가리지 않는 catch-all 이므로 반드시 마지막에 둡니다.
+
+```mermaid
+flowchart TD
+    START([execute_command<br/>user_text, tts]) --> TIMER
+
+    TIMER{"timer.handle<br/>타이머/스톱워치 의도?"}
+    TIMER -->|True: 처리함| TIMER_DO["timer.py 서브프로세스 실행<br/>(N초 후 알람 재생)"] --> DONE([턴 종료])
+    TIMER -->|False| HERMES
+
+    HERMES{"hermes_api.handle<br/>(.env 의 HERMES_API_KEY 로 on/off)"}
+    HERMES -->|enabled → LLM 응답| HERMES_DO["hermes gateway 질의<br/>qwen3:8b → TTS 로 답변"] --> DONE
+    HERMES -->|disabled → False| ECHO
+
+    ECHO["폴백: 인식 결과 그대로 안내<br/>tts.speak('인지된 음성은 …')"] --> DONE
+```
+
+> 새 기능 추가 = `handle(user_text, tts)` 함수를 작성해 `SKILLS` 리스트에 등록하면 끝입니다. (루프 코드는 그대로) 단, catch-all 인 `hermes_api.handle` 앞에 등록하세요.
+
+## 모듈 구성
+
+| 단계 | 모듈 | 핵심 함수 |
+| --- | --- | --- |
+| 진입점/오케스트레이터 | `main_agent.py` | `main()`, `execute_command()` |
+| 설정·환경 프리셋 | `agent/config.py` | `parse_device_args()`, `load_env_file()` |
+| 오디오 I/O | `agent/audio_io.py` | `open_input_stream()`, `record_frames()`, `play_wav_file()`, `resolve_devices()` |
+| 호출어 감지 | `agent/wakeword.py` | `load_wakeword_model()`, `get_score()` |
+| STT (음성→텍스트) | `agent/stt.py` | `load_stt_model()`, `transcribe_pcm()` |
+| TTS (텍스트→음성) | `agent/tts.py` | `TextToSpeech.speak()` |
+| 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
+| 스킬: LLM (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
+
+> 모델(Wake Word / STT / TTS)은 import 시점이 아니라 `main()` 안에서 **한 번만** 로드됩니다. 덕분에 다른 스크립트가 `agent` 하위 모듈을 개별 import 해도 전체 파이프라인이 딸려오지 않습니다.
+
+
 # Python venv
 ```bash
 mkdir home-bser
@@ -35,16 +98,26 @@ pip3 install uroman
 ```bash
 # it must be executed in venv
 # --environment 로 실행 환경 프리셋을 선택합니다 (dev | prod, 기본값: dev)
-python main_agent.py                    # 기본 dev (cpu, mic 0)
+python main_agent.py                    # 기본 dev (cpu, mic index 0)
 python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
-python main_agent.py --environment prod # 운영환경: cpu STT/TTS, mic index 2
+python main_agent.py --environment prod # 운영환경: cpu STT/TTS, USB 장치를 이름으로 탐색
+python main_agent.py --list-devices     # 입출력 장치 이름/인덱스 확인
 ```
-- `--environment` 프리셋은 STT/TTS 실행 디바이스와 마이크 입력 인덱스를 함께 결정합니다.
-  - `dev` — `device=cpu`, `input-device=0`
-  - `prod` — `device=cpu`, `input-device=2`
+- `--environment` 프리셋은 STT/TTS 실행 디바이스와 마이크·스피커 장치를 함께 결정합니다.
+  - `dev` — `device=cpu`, 마이크 인덱스 `0`, 기본 스피커
+  - `prod` — `device=cpu`, 마이크/스피커를 **이름**(`"USB"`)으로 탐색
 - STT/TTS 는 모든 환경에서 CPU 로 동작합니다. GPU(cuda) 는 추후 로컬 LLM 스테이지 전용으로 남겨둡니다.
 - 프로그램 로드 시 선택된 환경이 로그로 출력됩니다. (예: `[System] 실행 환경: ...`)
 - STT(Faster-Whisper) compute_type 은 디바이스에 따라 자동 설정됩니다. (cuda: float16, cpu: int8) — 현재는 두 프리셋 모두 cpu 이므로 항상 int8.
+
+### 장치 선택 (인덱스가 아니라 이름으로)
+PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마이크/스피커의 인덱스는 **재부팅·재연결 때마다 바뀝니다** (하드코딩한 `2` 는 깨짐). 그래서 `prod` 프리셋은 인덱스 대신 이름 패턴(`input_device_name` / `output_device_name`)을 들고 있고, 시작 시 `resolve_devices()` 가 이를 실제 인덱스로 해석합니다.
+
+- 이름 없음(`dev`) → 프리셋의 인덱스(`0` / 기본)를 그대로 사용.
+- 이름이 일치 → 그 인덱스를 사용하고 매칭을 로그로 남김. 여러 개 일치하면 첫 번째를 선택.
+- 이름이 아무것도 매칭 안 됨 → 경고 후 장치 목록을 출력하고 프리셋 인덱스(`None` = 시스템 기본)로 폴백. 즉 USB 장치가 없어도 크래시 대신 degrade 됩니다.
+
+이름 패턴은 코드 수정 없이 `.env` 로 덮어쓸 수 있습니다 (`AUDIO_INPUT_NAME`, `AUDIO_OUTPUT_NAME`; 빈 값이면 프리셋으로 폴백). 대상 머신의 실제 장치 이름은 `--list-devices` 로 확인하세요.
 
 ## How to run in production (상시 실행)
 SSH 연결이 닫혀도 프로세스가 종료되지 않도록 `nohup` 으로 백그라운드 실행합니다.
