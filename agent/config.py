@@ -15,10 +15,24 @@ CHUNK = 1280
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-RECORD_SECONDS = 5
+RECORD_SECONDS = 5   # (레거시) 고정 길이 녹음용. 현재 파이프라인은 VAD 동적 녹음을 사용.
 TTS_OUTPUT_FILE = "response.wav"
 WAKE_RESPONSE_FILE = "soundfile/res0.wav"   # 호출어("알렉사") 감지 성공 시 사용자에게 들려줄 응답음
 TIMER_ALARM_FILE = "soundfile/timer_wakeup.wav"   # 타이머 종료 시 재생할 알람음
+
+
+# ==========================================
+# STT 동적 녹음(VAD endpointing) 파라미터
+# ==========================================
+# 고정 5초 녹음 대신, 말이 시작되면 녹음하고 일정 시간 무음이면 종료한다.
+#   - 짧은 명령은 1~2초에 즉시 반응, 긴 명령(5초 초과)도 상한까지 안 잘림
+#   - 무음이 녹음에 거의 안 들어가므로 Whisper 환각(무음 구간 상투구)도 완화
+# 종료 판정은 Silero VAD(agent/vad.py)의 프레임별 음성 확률로 한다.
+STT_MIN_RECORD_SECONDS = 0.5     # 최소 녹음. 순간 잡음 한 프레임으로 즉시 끊기는 것 방지
+STT_MAX_RECORD_SECONDS = 15.0    # 최대 녹음. 소음 환경에서 무한 녹음되는 것 방지(하드 상한)
+STT_SILENCE_MS = 800             # 발화 시작 후 이만큼 연속 무음이면 발화 끝으로 판정
+STT_START_TIMEOUT_SECONDS = 6.0  # 호출만 하고 이 시간 내 아무 말 없으면 조용히 취소
+VAD_THRESHOLD = 0.5              # Silero 음성 확률이 이 값 이상이면 '음성' 프레임으로 간주
 
 
 # 실행 환경(--environment) 프리셋

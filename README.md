@@ -18,7 +18,7 @@ flowchart TD
         WAKE -->|아니오| WAKE
         WAKE -->|예| ACK["② 응답음 재생<br/>play_wav_file(res0.wav)<br/>= '듣고 있어요' 신호"]
         ACK --> FLUSH["버퍼 비우기<br/>flush_input_stream<br/>(응답음 녹음 방지)"]
-        FLUSH --> REC["③ 녹음<br/>record_frames(5s)<br/>+ stream.stop_stream"]
+        FLUSH --> REC["③ 녹음 (VAD 동적)<br/>record_until_silence<br/>+ stream.stop_stream"]
         REC --> STT["④ STT<br/>transcribe_pcm<br/>faster-whisper (한국어)"]
         STT --> EXEC["⑤ 명령 처리<br/>execute_command(user_text, tts)"]
         EXEC --> RESET["대기 복귀<br/>start_stream + flush<br/>+ reset_wakeword_state"]
@@ -80,6 +80,7 @@ pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
 pip3 install requests
 pip3 install torch transformers scipy
 pip3 install uroman
+pip3 install silero-vad   # 발화 종료 감지(VAD endpointing). 모델을 번들해 오프라인 로드
 ```
 
 > **cuDNN 버전 핀 주의**
@@ -162,6 +163,9 @@ openwakeword
 
 # --- STT (음성 인식, CUDA 가속) ---
 faster-whisper
+
+# --- VAD (발화 종료 감지, endpointing) ---
+silero-vad
 
 # --- TTS (음성 합성) ---
 torch

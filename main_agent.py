@@ -2,13 +2,16 @@ import numpy as np
 
 from agent.config import (
     CHUNK,
-    RECORD_SECONDS,
     WAKE_RESPONSE_FILE,
+    STT_MIN_RECORD_SECONDS,
+    STT_MAX_RECORD_SECONDS,
+    STT_SILENCE_MS,
+    STT_START_TIMEOUT_SECONDS,
     parse_device_args,
 )
 from agent.audio_io import (
     open_input_stream,
-    record_frames,
+    record_until_silence,
     play_wav_file,
     flush_input_stream,
     list_input_devices,
@@ -18,6 +21,7 @@ from agent.audio_io import (
 import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
+from agent.vad import load_vad
 from agent.tts import TextToSpeech
 from agent.skills import timer, hermes_api
 
@@ -85,6 +89,7 @@ def main():
 
     oww_model = load_wakeword_model("alexa")
     whisper_model = load_stt_model(cfg.device, cfg.stt_compute_type)
+    vad = load_vad()   # 발화 종료 감지(endpointing)용 Silero VAD
     tts = TextToSpeech(cfg.device, output_device_index=output_device_index)
 
     print("[System] 모델 로드 완료! 에이전트가 준비되었습니다.")
@@ -116,22 +121,32 @@ def main():
                 # 앞으로 밀리고(= 응답음이 녹음되고) 사용자 말끝이 잘린다.
                 flush_input_stream(stream)
 
-                # STT 녹음 및 변환
-                pcm_bytes = record_frames(stream, RECORD_SECONDS)
-
-                print("🛑 녹음 완료! 생각 중...")
+                # STT 녹음: 고정 길이 대신 VAD 로 발화가 끝날 때까지 동적 녹음.
+                # 짧은 명령은 즉시 종료, 긴 명령은 상한(STT_MAX_RECORD_SECONDS)까지 안 잘림.
+                pcm_bytes = record_until_silence(
+                    stream, vad,
+                    min_seconds=STT_MIN_RECORD_SECONDS,
+                    max_seconds=STT_MAX_RECORD_SECONDS,
+                    silence_ms=STT_SILENCE_MS,
+                    start_timeout_seconds=STT_START_TIMEOUT_SECONDS,
+                )
 
                 # STT/명령 처리(TTS·알람 재생 포함) 동안 마이크 입력을 정지하여
                 # 스피커 출력이 녹음되어 웨이크워드를 재호출하는 것을 방지
                 stream.stop_stream()
 
-                user_text = transcribe_pcm(whisper_model, pcm_bytes)
+                if not pcm_bytes:
+                    # 호출만 하고 발화가 없었음 → 조용히 대기 상태로 복귀
+                    print("🤫 발화가 감지되지 않았습니다. 대기 상태로 돌아갑니다.")
+                else:
+                    print("🛑 녹음 완료! 생각 중...")
+                    user_text = transcribe_pcm(whisper_model, pcm_bytes)
 
-                if user_text:
-                    print(f"👤 사용자: {user_text}")
+                    if user_text:
+                        print(f"👤 사용자: {user_text}")
 
-                    # 코어: 사용자 명령 수행
-                    execute_command(user_text, tts)
+                        # 코어: 사용자 명령 수행
+                        execute_command(user_text, tts)
 
                 print("====================================================")
                 print("🎙️ 대기 중...")

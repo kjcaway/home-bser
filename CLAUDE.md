@@ -53,7 +53,7 @@ python text_to_wav.py --name out.wav --text "안녕하세요"   # TTS text → w
 Install dependencies (see `README.md` for the full list):
 
 ```bash
-pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman openai
+pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman openai silero-vad
 pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
 ```
 
@@ -69,8 +69,9 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`, `_supports_input_format()` / `_supports_output_format()` (오픈 전 레이트 지원 조회로 ALSA 경고 회피).
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `record_frames()` (레거시 고정 길이), `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`, `_supports_input_format()` / `_supports_output_format()` (오픈 전 레이트 지원 조회로 ALSA 경고 회피).
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
+- `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
@@ -83,7 +84,7 @@ Models are loaded once inside `main()` (not at import time), so other scripts ca
 
 1. **Wake word** — score each mic chunk; > 0.5 on "alexa" triggers a turn.
 2. **Wake acknowledgment** — plays `res0.wav` (`WAKE_RESPONSE_FILE`) so the user knows the agent is listening, then starts recording.
-3. **STT** — records `RECORD_SECONDS` (5s), transcribes with faster-whisper (Korean).
+3. **STT** — records **dynamically** with VAD endpointing (`record_until_silence()`, see below) instead of a fixed window, then transcribes with faster-whisper (Korean). If no speech was detected (user triggered the wake word but said nothing), the turn is skipped silently.
 4. **Intent + action** — `process_user_command()` (see below).
 5. Calls `oww_model.reset()` after each turn to clear wake-word state.
 
@@ -97,6 +98,19 @@ The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assum
 **Why probe first, not try-then-catch:** an earlier version simply called `open()` at 16 kHz and caught the `OSError`. That works, but `Pa_OpenStream` reaches the ALSA stream-configure path before failing, and PortAudio prints C-level `paInvalidSampleRate` / `PaAlsaStream_Configure … failed` warnings **directly to stderr** — which Python's `try/except` cannot suppress. `Pa_IsFormatSupported` is a lighter hw-params probe that does not enter that path, so the unsupported case is detected silently and no failed-open warning is emitted.
 
 `MicStream` exposes the same `read()`, `start_stream()`, `stop_stream()`, `close()`, and `get_read_available()` interface as a PyAudio stream, so `main_agent.py`, `record_frames()`, and `flush_input_stream()` use it unchanged. `scipy` is a required dependency for this resampling path.
+
+### Speech capture (VAD endpointing)
+
+The turn no longer records a fixed 5 s window. `record_until_silence()` (in `agent/audio_io.py`) records **until the user stops speaking**, using Silero VAD (`agent/vad.py`) to score each frame. This makes short commands respond in ~1–2 s and lets long commands run past the old 5 s cap without being cut off; because near-silence isn't captured, it also curbs Whisper's silence-region hallucinations. State machine (params in `agent/config.py`):
+
+- Before speech starts: if no speech is seen within `STT_START_TIMEOUT_SECONDS` (6 s), returns `b''` → `main_agent.py` skips the turn silently ("호출만 하고 말 없음").
+- After speech starts: `STT_SILENCE_MS` (800 ms) of continuous silence ends the utterance — but not before `STT_MIN_RECORD_SECONDS` (0.5 s) total, so a single noise blip can't end it instantly.
+- Hard cap `STT_MAX_RECORD_SECONDS` (15 s) stops runaway recording in noisy rooms.
+- `VAD_THRESHOLD` (0.5) is the speech-probability cutoff per frame.
+
+**512-sample framing:** Silero at 16 kHz requires exactly 512-sample (32 ms) windows, which isn't a divisor of `CHUNK` (1280). `record_until_silence()` therefore buffers samples across reads and feeds the VAD in 512-sample slices, carrying the remainder to the next read. `SileroVAD.reset()` clears the model's recurrent state at the start of each utterance so the previous turn doesn't leak into the next.
+
+**Offline:** `torch.hub` would download the model from GitHub; the pip `silero-vad` package bundles the jit model, so `load_vad()` loads with no network — the offline property holds. `torch` is already a dependency (TTS/STT), so the only new package is `silero-vad`.
 
 ### Playback (sample-rate handling)
 

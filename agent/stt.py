@@ -15,9 +15,10 @@ def load_stt_model(device, compute_type, model_size="small"):
 def transcribe_pcm(whisper_model, pcm_bytes, language="ko"):
     """int16 PCM 바이트를 텍스트로 변환합니다.
 
-    녹음은 RECORD_SECONDS 고정 길이라 사용자가 짧게 말하면 뒤쪽이 통째로 무음이다.
-    Whisper 는 무음 구간에서 학습 데이터(유튜브 자막)의 상투구를 환각 생성하므로
-    ("시청해주셔서 감사합니다" 등) 아래 옵션으로 이를 억제한다:
+    녹음은 VAD 동적 종료(record_until_silence)라 뒤쪽 무음은 짧지만, 발화 끝
+    판정 여유분(STT_SILENCE_MS)만큼의 무음과 배경 소음은 남는다. Whisper 는 무음
+    구간에서 학습 데이터(유튜브 자막)의 상투구를 환각 생성하므로("시청해주셔서
+    감사합니다" 등) 아래 옵션으로 이를 이중으로 억제한다:
       - vad_filter: 무음 구간을 아예 모델에 넣지 않는다 (환각 억제의 핵심)
       - condition_on_previous_text=False: 환각이 다음 세그먼트로 번지는 루프를 차단
       - no_speech_threshold / log_prob_threshold: 저신뢰 세그먼트를 버린다
