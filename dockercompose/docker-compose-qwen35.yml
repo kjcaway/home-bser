@@ -57,7 +57,7 @@ services:
       - --max-num-seqs
       - "8"                      # 1인용 홈 에이전트라 작게
       - --dtype
-      - bfloat16
+      - half                     # RTX 2060(Turing, CC 7.5)은 bf16 미지원 → float16 사용
       # Qwen3 는 <think> 추론 블록을 기본 방출한다. hermes_api.py 의 strip_think() 가 제거하지만,
       # 애초에 끄고 싶으면 요청에서 chat_template_kwargs={"enable_thinking": false} 를 보내거나
       # 아래 reasoning 파서를 켜 파싱 분리할 수 있다. (택일 — 기본은 주석 처리)

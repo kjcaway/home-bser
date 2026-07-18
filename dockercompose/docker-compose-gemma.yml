@@ -56,7 +56,7 @@ services:
       - --max-num-seqs
       - "8"                      # 동시 처리 시퀀스 수. 홈 에이전트는 1인용이라 작게
       - --dtype
-      - bfloat16
+      - half                     # RTX 2060(Turing, CC 7.5)은 bf16 미지원 → float16 사용
     deploy:
       resources:
         reservations:
