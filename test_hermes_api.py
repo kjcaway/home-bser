@@ -4,22 +4,34 @@
 질문을 보내고 응답을 확인합니다. OpenAI SDK 를 사용하되 base_url 만 hermes 로
 바꿔 호출합니다.
 
+설정은 hermes_api 스킬과 동일하게 프로젝트 루트의 `.env` 에서 읽습니다
+(`HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_TIMEOUT`).
+우선순위는 CLI 인자 > .env > 기본값 순입니다.
+
 사용 예:
-    python test_hermes_api.py                          # 기본 질문으로 테스트
+    python test_hermes_api.py                          # .env 설정으로 테스트
     python test_hermes_api.py "서울의 수도는 어디야?"      # 질문 직접 지정
     python test_hermes_api.py --base-url http://127.0.0.1:8642/v1 --model qwen3:8b
 """
 
 import argparse
+import os
 import re
 import sys
 import time
 
 from openai import OpenAI
 
+from agent.config import load_env_file
+
 DEFAULT_BASE_URL = "http://127.0.0.1:8642/v1"
 DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_TIMEOUT = 30.0
 DEFAULT_QUESTION = "안녕하세요. 자기소개를 한 문장으로 해주세요."
+
+# hermes 는 인증을 요구하지 않지만 OpenAI SDK 가 api_key 를 필수로 요구하므로,
+# .env 에 HERMES_API_KEY 가 없을 때 쓸 더미 값.
+DUMMY_API_KEY = "qqqqqqqqqqqqqqqq1"
 
 # 음성 에이전트와 동일한 조건으로 테스트하기 위한 시스템 프롬프트.
 # 응답은 TTS 로 읽히므로 짧은 한국어 평문을 요구한다.
@@ -39,20 +51,32 @@ def strip_think(text: str) -> str:
 
 
 def main():
+    # main_agent.py 와 동일하게 .env 를 읽어 os.environ 에 채운다.
+    # (이미 있는 실제 환경변수가 항상 우선한다)
+    load_env_file()
+
+    # 기본값은 .env(HERMES_*) → 하드코딩 순으로 정한다. CLI 인자를 명시하면
+    # argparse 가 이 기본값을 덮어쓰므로 최종 우선순위는 CLI > .env > 기본값.
+    env_base_url = os.environ.get("HERMES_BASE_URL", DEFAULT_BASE_URL)
+    env_model = os.environ.get("HERMES_MODEL", DEFAULT_MODEL)
+    env_timeout = float(os.environ.get("HERMES_TIMEOUT", DEFAULT_TIMEOUT))
+
     parser = argparse.ArgumentParser(description="hermes gateway OpenAI 호환 API 테스트")
     parser.add_argument("question", nargs="?", default=DEFAULT_QUESTION,
                         help=f"질문 문장 (기본값: {DEFAULT_QUESTION!r})")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
-                        help=f"hermes gateway 주소 (기본값: {DEFAULT_BASE_URL})")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help=f"모델 이름 (기본값: {DEFAULT_MODEL})")
-    parser.add_argument("--timeout", type=float, default=30.0,
-                        help="응답 대기 제한 시간(초) (기본값: 30)")
+    parser.add_argument("--base-url", default=env_base_url,
+                        help=f"hermes gateway 주소 (기본값: {env_base_url})")
+    parser.add_argument("--model", default=env_model,
+                        help=f"모델 이름 (기본값: {env_model})")
+    parser.add_argument("--timeout", type=float, default=env_timeout,
+                        help=f"응답 대기 제한 시간(초) (기본값: {env_timeout})")
     args = parser.parse_args()
 
-    # hermes 는 인증을 요구하지 않지만 SDK 가 api_key 를 필수로 요구하므로 더미 값을 넣는다.
+    # hermes 는 인증을 요구하지 않지만 SDK 가 api_key 를 필수로 요구한다.
+    # .env 의 HERMES_API_KEY 가 있으면 쓰고, 없으면 더미 값을 넣는다.
     # 연결 실패를 바로 알 수 있도록 SDK 기본 재시도(2회)는 끈다.
-    client = OpenAI(base_url=args.base_url, api_key="qqqqqqqqqqqqqqqq1",
+    api_key = os.environ.get("HERMES_API_KEY") or DUMMY_API_KEY
+    client = OpenAI(base_url=args.base_url, api_key=api_key,
                     timeout=args.timeout, max_retries=0)
 
     print(f"[System] hermes gateway: {args.base_url} (model: {args.model})")
