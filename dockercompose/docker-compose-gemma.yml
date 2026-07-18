@@ -1,0 +1,72 @@
+# vLLM + Gemma 3 (4B) — 8GB VRAM 운영환경용 docker-compose
+#
+# 하는 일: vLLM OpenAI 호환 서버를 띄워 gemma-3-4b-it 모델을 서빙한다.
+# 기존 agent/skills/hermes_api.py 가 기대하는 OpenAI 호환 엔드포인트(/v1)를 그대로 제공하므로,
+# .env 의 HERMES_BASE_URL 만 이 서버로 바꾸면 ollama 대신 vLLM 으로 교체된다.
+#
+# VRAM 메모:
+#   - gemma-3-4b-it 를 bf16 로 그냥 올리면 가중치만 ~8.6GB → 8GB 카드에 안 들어감(KV캐시 자리 없음).
+#   - 그래서 여기서는 bitsandbytes 4bit 로 양자화해 ~3GB 로 줄이고, 나머지를 KV캐시로 쓴다.
+#   - 4b 가 버거우면 아래 command 의 --model 을 google/gemma-3-1b-it 로 바꾸고
+#     --quantization / --load-format 두 줄을 지우면 bf16 로도 8GB 에 여유롭게 들어간다.
+#
+# 사전 준비:
+#   1) NVIDIA 드라이버 + nvidia-container-toolkit 설치 (docker 가 GPU 를 보게)
+#   2) HuggingFace 에서 google/gemma-3-4b-it 라이선스 동의 후 토큰 발급
+#   3) 같은 폴더에 .env 생성 (.env.example 참고) → HUGGING_FACE_HUB_TOKEN 채우기
+#
+# 실행 (compose 파일이 여러 개라 -f 로 지정):
+#   cd dockercompose
+#   docker compose -f docker-compose-gemma.yml up -d
+#   curl http://localhost:8000/v1/models        # 확인
+#
+# hermes 에이전트(hermes_api.py)에서 custom endpoint 로 이 서버(:8000)를 가리켜 LLM 을 붙인다.
+# 주의: qwen 파일과 같은 호스트 포트(8000)를 쓰므로 둘을 동시에 띄우지 말 것 (택일).
+
+services:
+  vllm-gemma:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-gemma
+    restart: unless-stopped
+    ports:
+      # 호스트 8000 → 컨테이너 8000. hermes 에서 custom endpoint 로 :8000 을 가리킨다.
+      # (8642/8643 은 hermes gateway 쪽 포트라 피한다.)
+      - "8000:8000"
+    environment:
+      # gemma 는 gated 모델이라 다운로드에 토큰 필요. .env 에서 주입.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+    volumes:
+      # 모델 캐시를 호스트에 보존 → 재시작마다 재다운로드 방지.
+      - ./hf-cache:/root/.cache/huggingface
+    ipc: host   # vLLM 이 공유메모리를 크게 쓰므로 권장
+    command:
+      - --model
+      - google/gemma-3-4b-it
+      - --served-model-name
+      - gemma-3-4b-it            # OpenAI API 의 model 필드로 쓰는 이름 (.env 의 HERMES_MODEL 과 맞출 것)
+      - --quantization
+      - bitsandbytes             # 4bit 인플라이트 양자화 (8GB 적합의 핵심)
+      - --load-format
+      - bitsandbytes
+      - --max-model-len
+      - "8192"                   # 컨텍스트 길이. KV캐시 = 이 값에 비례. 8GB 라 과하게 늘리지 말 것
+      - --gpu-memory-utilization
+      - "0.90"                   # 가용 VRAM 의 90%까지 사용 (다른 GPU 프로세스 있으면 낮출 것)
+      - --max-num-seqs
+      - "8"                      # 동시 처리 시퀀스 수. 홈 에이전트는 1인용이라 작게
+      - --dtype
+      - bfloat16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 300s   # 최초 모델 다운로드/로딩 시간 고려

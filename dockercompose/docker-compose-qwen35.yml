@@ -1,0 +1,78 @@
+# vLLM + Qwen3 (4B) — 8GB VRAM 운영환경용 docker-compose
+#
+# 하는 일: vLLM OpenAI 호환 서버로 Qwen3-4B 를 서빙한다.
+# gemma 파일과 동일하게 OpenAI 호환 /v1 엔드포인트를 제공하므로 hermes_api.py 가 그대로 붙는다.
+#
+# 모델 태그 메모:
+#   - 요청은 "qwen3.5:4b" 였으나 (2026-01 기준) Qwen3.5-4B 는 확인되지 않는 태그다.
+#     Qwen 계열 최신은 Qwen3 이고 4B 는 Qwen/Qwen3-4B → 이를 기본값으로 채택.
+#     환경에 Qwen3.5-4B 가 실제로 있으면 아래 --model 한 줄만 그 repo id 로 바꾸면 된다.
+#   - Qwen3 는 gated 가 아니라 HF 토큰 없이 다운로드된다 (gemma 와 다른 점).
+#
+# VRAM 메모:
+#   - Qwen3-4B 를 bf16 로 올리면 가중치만 ~8GB → 8GB 카드엔 KV캐시 자리가 없다.
+#   - 그래서 bitsandbytes 4bit 로 양자화(~3GB)해 KV캐시 여유를 확보. (gemma 파일과 동일 전략)
+#
+# 사전 준비:
+#   1) NVIDIA 드라이버 + nvidia-container-toolkit
+#   2) (선택) .env 는 gemma 와 공용. Qwen 은 토큰이 필요 없어 비워둬도 된다.
+#
+# 실행 (compose 파일이 여러 개라 -f 로 지정):
+#   cd dockercompose
+#   docker compose -f docker-compose-qwen35.yml up -d
+#   curl http://localhost:8000/v1/models
+#
+# hermes 에이전트(hermes_api.py)에서 custom endpoint 로 이 서버(:8000)를 가리켜 LLM 을 붙인다.
+# 주의: gemma 파일과 같은 호스트 포트(8000)를 쓰므로 둘을 동시에 띄우지 말 것 (택일).
+
+services:
+  vllm-qwen:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-qwen
+    restart: unless-stopped
+    ports:
+      # 호스트 8000 → 컨테이너 8000. hermes 에서 custom endpoint 로 :8000 을 가리킨다.
+      # (8642/8643 은 hermes gateway 쪽 포트라 피한다.)
+      - "8000:8000"
+    environment:
+      # Qwen3 는 gated 아님 → 토큰 불필요. .env 에 있으면 쓰고, 없어도 무방.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+    volumes:
+      - ./hf-cache:/root/.cache/huggingface
+    ipc: host
+    command:
+      - --model
+      - Qwen/Qwen3-4B
+      - --served-model-name
+      - qwen3-4b                 # OpenAI API model 필드 이름 (.env 의 HERMES_MODEL 과 일치시킬 것)
+      - --quantization
+      - bitsandbytes             # 4bit 인플라이트 양자화 (8GB 적합의 핵심)
+      - --load-format
+      - bitsandbytes
+      - --max-model-len
+      - "8192"                   # 컨텍스트 길이 = KV캐시 크기에 비례. 8GB 라 과하게 늘리지 말 것
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-num-seqs
+      - "8"                      # 1인용 홈 에이전트라 작게
+      - --dtype
+      - bfloat16
+      # Qwen3 는 <think> 추론 블록을 기본 방출한다. hermes_api.py 의 strip_think() 가 제거하지만,
+      # 애초에 끄고 싶으면 요청에서 chat_template_kwargs={"enable_thinking": false} 를 보내거나
+      # 아래 reasoning 파서를 켜 파싱 분리할 수 있다. (택일 — 기본은 주석 처리)
+      # - --reasoning-parser
+      # - qwen3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 300s   # 최초 모델 다운로드/로딩 고려
