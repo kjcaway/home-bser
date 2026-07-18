@@ -27,6 +27,7 @@ from agent.backgroundsound import BackgroundSound
 from agent.config import (
     WAITING_SOUND_FILE,
     WAITING_SOUND_DELAY_SECONDS,
+    WAITING_SOUND_INTERVAL_SECONDS,
     load_env_file,
 )
 
@@ -125,6 +126,7 @@ def handle(user_sentence: str, tts) -> bool:
         WAITING_SOUND_FILE,
         output_device_index=tts.output_device_index,
         delay_seconds=WAITING_SOUND_DELAY_SECONDS,
+        interval_seconds=WAITING_SOUND_INTERVAL_SECONDS,
     )
     waiting.start()
 
