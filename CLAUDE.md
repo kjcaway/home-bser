@@ -69,7 +69,7 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`.
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_frames()`, `play_wav_file(file_path, output_device_index=None)`, `_convert_pcm16()`, `_supports_input_format()` / `_supports_output_format()` (오픈 전 레이트 지원 조회로 ALSA 경고 회피).
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
@@ -89,19 +89,21 @@ Models are loaded once inside `main()` (not at import time), so other scripts ca
 
 ### Microphone capture (sample-rate handling)
 
-The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assume 16 kHz). Most raw hardware ALSA devices (`hw:*`) do **not** support 16 kHz directly, so PyAudio fails with `-9997 Invalid sample rate` (and `-9999` on other mismatches). `open_input_stream()` therefore returns a `MicStream` wrapper instead of a bare PyAudio stream:
+The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assume 16 kHz). Most raw hardware ALSA devices (`hw:*`) do **not** support 16 kHz directly (PyAudio would fail with `-9997 Invalid sample rate`, and `-9999` on other mismatches). `open_input_stream()` therefore returns a `MicStream` wrapper instead of a bare PyAudio stream:
 
-1. It first tries to open the device at 16 kHz / mono directly — sound-server devices (`pulse`, `default`, `sysdefault`) support this via their own conversion.
-2. If that raises `OSError`, it reopens the device at its **native** sample rate and channel count (e.g. USB-C Speaker = 48000 Hz stereo) and, on every `read()`, downmixes to mono and resamples to 16 kHz in software via `scipy.signal.resample_poly`. This path logs `[System] 마이크 네이티브 …Hz/…ch → 16000Hz/모노 소프트웨어 변환 사용` at startup.
+1. It resolves the target device to a concrete index (default input device if none given), then **probes** whether that device supports 16 kHz / mono via `_supports_input_format()` (`PyAudio.is_format_supported`) — sound-server devices (`pulse`, `default`, `sysdefault`) support this via their own conversion. Only if supported does it actually open at 16 kHz / mono.
+2. If the probe says unsupported, it opens the device at its **native** sample rate and channel count (e.g. USB-C Speaker = 48000 Hz stereo) and, on every `read()`, downmixes to mono and resamples to 16 kHz in software via `scipy.signal.resample_poly`. This path logs `[System] 마이크 네이티브 …Hz/…ch → 16000Hz/모노 소프트웨어 변환 사용` at startup.
+
+**Why probe first, not try-then-catch:** an earlier version simply called `open()` at 16 kHz and caught the `OSError`. That works, but `Pa_OpenStream` reaches the ALSA stream-configure path before failing, and PortAudio prints C-level `paInvalidSampleRate` / `PaAlsaStream_Configure … failed` warnings **directly to stderr** — which Python's `try/except` cannot suppress. `Pa_IsFormatSupported` is a lighter hw-params probe that does not enter that path, so the unsupported case is detected silently and no failed-open warning is emitted.
 
 `MicStream` exposes the same `read()`, `start_stream()`, `stop_stream()`, `close()`, and `get_read_available()` interface as a PyAudio stream, so `main_agent.py`, `record_frames()`, and `flush_input_stream()` use it unchanged. `scipy` is a required dependency for this resampling path.
 
 ### Playback (sample-rate handling)
 
-Playback has the mirror-image problem: the wav files (`res0.wav`, the TTS `response.wav`, the timer alarm) are all 16 kHz, but raw hardware output devices reject that rate with `-9999`. `play_wav_file()` handles it the same way:
+Playback has the mirror-image problem: the wav files (`res0.wav`, the TTS `response.wav`, the timer alarm) are all 16 kHz, but raw hardware output devices reject that rate. `play_wav_file()` handles it the same way, and — like the mic path — **probes before opening** to avoid PortAudio's stderr ALSA warnings (see "Why probe first" above; these warnings surfaced every turn because playback runs each turn, whereas the mic opens once at startup):
 
-1. It first tries to open the output stream at the wav's own rate / channel count.
-2. If that raises `OSError`, it reopens at the output device's **native** rate / channels and converts the 16-bit PCM in software via `_convert_pcm16()` — mono downmix → `scipy.signal.resample_poly` → duplicate up to the target channel count. This path logs `[System] 재생 네이티브 변환: …Hz/…ch → …Hz/…ch`.
+1. It resolves the target device to a concrete index (default output device if none given), then probes whether that device supports the wav's own rate / channel count via `_supports_output_format()` (`PyAudio.is_format_supported`). If supported, it opens at the wav's rate directly.
+2. If unsupported, it opens at the output device's **native** rate / channels and converts the 16-bit PCM in software via `_convert_pcm16()` — mono downmix → `scipy.signal.resample_poly` → duplicate up to the target channel count. This path logs `[System] 재생 네이티브 변환: …Hz/…ch → …Hz/…ch`.
 
 `_convert_pcm16()` only handles 16-bit PCM (all wavs in this repo are 16-bit); a non-16-bit file that the device can't open natively is skipped with a message rather than crashing. `play_wav_file()` also accepts an optional `output_device_index` (defaults to the system default output device).
 
