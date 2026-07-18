@@ -23,7 +23,12 @@ import os
 import re
 import time
 
-from agent.config import load_env_file
+from agent.backgroundsound import BackgroundSound
+from agent.config import (
+    WAITING_SOUND_FILE,
+    WAITING_SOUND_DELAY_SECONDS,
+    load_env_file,
+)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8642/v1"
 DEFAULT_MODEL = "qwen3:8b"
@@ -113,16 +118,28 @@ def handle(user_sentence: str, tts) -> bool:
 
     print(f"-> hermes 에 질문합니다: {user_sentence}")
 
+    # 응답이 지연되면(임계값 초과) 대기음을 반복 재생해 '처리 중'임을 알린다.
+    # 임계값 안에 응답이 오면 재생을 시작하지 않는다. TTS 재생과 겹치지 않도록
+    # answer 를 말하기 전에 반드시 stop()(스트림 정리까지 대기)을 호출한다.
+    waiting = BackgroundSound(
+        WAITING_SOUND_FILE,
+        output_device_index=tts.output_device_index,
+        delay_seconds=WAITING_SOUND_DELAY_SECONDS,
+    )
+    waiting.start()
+
     start = time.monotonic()
     try:
         answer = ask(user_sentence)
     except Exception as e:
+        waiting.stop()
         print(f"[오류] hermes API 호출 실패: {e}")
         print("       hermes gateway 가 실행 중인지, .env 의 HERMES_BASE_URL 이 맞는지 확인하세요.")
         tts.speak(ERROR_MESSAGE)
         return True
-
     elapsed = time.monotonic() - start
+
+    waiting.stop()   # answer 를 말하기 전에 대기음을 멈추고 스트림 정리까지 대기
 
     # 모델이 <think> 블록만 뱉고 본문이 비는 경우가 있어 방어한다.
     if not answer:

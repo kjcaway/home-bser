@@ -366,13 +366,16 @@ def _supports_output_format(p, device_index, channels, rate, fmt):
         return False
 
 
-def play_wav_file(file_path, output_device_index=None):
+def play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False):
     """wav 파일을 스피커로 재생합니다.
 
     출력 장치가 wav 원본 레이트를 직접 지원하는지 먼저 조회하고, 지원하지 않으면
     (raw hw 장치 등) 16kHz 직접 오픈을 시도하지 않고 곧바로 장치의 네이티브
     레이트/채널로 열어 16-bit PCM 을 소프트웨어 변환하여 재생합니다. 실패하는
     오픈 시도가 없으므로 ALSA 의 paInvalidSampleRate 경고가 뜨지 않습니다.
+
+    stop_event(threading.Event) 를 주면 재생 중 set 되는 즉시 청크 경계에서 멈춥니다.
+    loop=True 면 stop_event 가 set 될 때까지 파일을 반복 재생합니다(대기음 용도).
     """
     if not os.path.exists(file_path):
         print(f"❌ 재생할 파일을 찾을 수 없습니다: {file_path}")
@@ -416,10 +419,15 @@ def play_wav_file(file_path, output_device_index=None):
         stream = p.open(format=fmt, channels=dst_channels, rate=dst_rate, output=True,
                         output_device_index=output_device_index)
 
-    # 청크 단위로 기록
+    # 청크 단위로 기록 (stop_event 가 set 되면 청크 경계에서 즉시 중단, loop 면 반복)
     step = 1024 * 2 * out_channels  # frames * bytes_per_sample(2) * channels
-    for i in range(0, len(out_frames), step):
-        stream.write(out_frames[i:i + step])
+    while True:
+        for i in range(0, len(out_frames), step):
+            if stop_event is not None and stop_event.is_set():
+                break
+            stream.write(out_frames[i:i + step])
+        if not loop or (stop_event is not None and stop_event.is_set()):
+            break
 
     stream.stop_stream()
     stream.close()
