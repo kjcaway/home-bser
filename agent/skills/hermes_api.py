@@ -136,7 +136,7 @@ def ask(question: str) -> str:
 # ==========================================
 # hermes 질의 스킬 진입점
 # ==========================================
-def handle(user_sentence: str, tts) -> bool:
+def handle(user_text: str, tts) -> bool:
     """hermes LLM 질의 스킬 진입점 (catch-all).
 
     .env 에 hermes 설정이 없으면 False 를 반환하여 디스패처의 기존 에코 폴백이
@@ -147,7 +147,7 @@ def handle(user_sentence: str, tts) -> bool:
     if not is_enabled():
         return False
 
-    print(f"-> hermes 에 질문합니다: {user_sentence}")
+    print(f"-> hermes 에 질문합니다: {user_text}")
 
     # 응답이 지연되면(임계값 초과) 대기음을 반복 재생해 '처리 중'임을 알린다.
     # 임계값 안에 응답이 오면 재생을 시작하지 않는다. TTS 재생과 겹치지 않도록
@@ -162,7 +162,7 @@ def handle(user_sentence: str, tts) -> bool:
 
     start = time.monotonic()
     try:
-        answer = ask(user_sentence)
+        answer = ask(user_text)
     except Exception as e:
         waiting.stop()
         print(f"[오류] hermes API 호출 실패: {e}")

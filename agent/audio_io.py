@@ -9,18 +9,32 @@ from scipy.signal import resample_poly
 from agent.config import CHUNK, FORMAT, CHANNELS, RATE
 
 
-def _supports_input_format(audio, device_index, channels, rate, fmt):
-    """입력 장치가 해당 레이트/채널을 직접 지원하는지 조회한다.
+def _supports_format(audio, device_index, channels, rate, fmt, kind="input"):
+    """장치가 해당 레이트/채널을 직접 지원하는지 조회한다 (입력/출력 공통).
 
     Pa_OpenStream 대신 Pa_IsFormatSupported(가벼운 hw params 프로브)만 사용하므로,
-    raw hw 장치의 레이트 거부 시 PortAudio 가 stderr 로 출력하는 C 레벨 ALSA 경고가
-    발생하지 않는다.
+    raw hw 장치의 레이트 거부 시 PortAudio 가 stderr 로 쏟아내는 C 레벨 ALSA 경고
+    (paInvalidSampleRate / PaAlsaStream_Configure ... failed)가 발생하지 않는다.
     """
     try:
-        return audio.is_format_supported(rate, input_device=device_index,
-                                         input_channels=channels, input_format=fmt)
+        if kind == "input":
+            return audio.is_format_supported(rate, input_device=device_index,
+                                             input_channels=channels, input_format=fmt)
+        return audio.is_format_supported(rate, output_device=device_index,
+                                         output_channels=channels, output_format=fmt)
     except ValueError:
         return False
+
+
+def _downmix_to_mono(samples, channels):
+    """다채널 int16 샘플 배열을 float64 모노로 다운믹스한다 (모노면 dtype 만 변환).
+
+    채널 수의 배수로 딱 떨어지지 않는 꼬리 샘플은 버려 reshape 오류를 막는다.
+    """
+    if channels > 1:
+        usable = (len(samples) // channels) * channels
+        return samples[:usable].reshape(-1, channels).mean(axis=1)
+    return samples.astype(np.float64)
 
 
 class MicStream:
@@ -32,12 +46,11 @@ class MicStream:
     네이티브 레이트/채널로 열어 read() 할 때마다 16kHz 모노로 소프트웨어 변환한다.
 
     stream.read/start_stream/stop_stream/close/get_read_available 인터페이스를
-    그대로 노출하므로 기존 호출부(main_agent, record_frames, flush)는 수정 불필요.
+    그대로 노출하므로 기존 호출부(main_agent, record_until_silence, flush)는 수정 불필요.
     """
 
     def __init__(self, audio, device_index=None):
         self.audio = audio
-        self._device_index = device_index
 
         # is_format_supported 는 구체 장치 인덱스가 필요하므로 기본 입력 장치를 해석
         if device_index is not None:
@@ -47,7 +60,7 @@ class MicStream:
         resolved_index = int(info["index"])
 
         # 1) 장치가 16kHz/모노를 직접 지원하면 그대로 오픈 (오픈 시도 없이 미리 조회)
-        if _supports_input_format(audio, resolved_index, CHANNELS, RATE, FORMAT):
+        if _supports_format(audio, resolved_index, CHANNELS, RATE, FORMAT, "input"):
             self._stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE,
                                       input=True, frames_per_buffer=CHUNK,
                                       input_device_index=device_index)
@@ -84,12 +97,7 @@ class MicStream:
         raw = self._stream.read(native, exception_on_overflow=exception_on_overflow)
         samples = np.frombuffer(raw, dtype=np.int16)
 
-        if self.capture_channels > 1:
-            usable = (len(samples) // self.capture_channels) * self.capture_channels
-            samples = samples[:usable].reshape(-1, self.capture_channels).mean(axis=1)
-        else:
-            samples = samples.astype(np.float64)
-
+        samples = _downmix_to_mono(samples, self.capture_channels)
         converted = resample_poly(samples, self._up, self._down)
 
         # 정확히 num_frames 길이로 맞춤 (경계 오차 보정)
@@ -116,39 +124,46 @@ class MicStream:
         self._stream.close()
 
 
-def list_input_devices(audio):
-    """사용 가능한 입력(마이크) 장치 목록을 출력합니다."""
-    print("[System] 사용 가능한 입력 장치 목록:")
+def _list_devices(audio, kind):
+    """사용 가능한 입력(마이크)/출력(스피커) 장치 목록을 출력한다.
+
+    출력 장치일 때만 시스템 기본 장치에 '(기본)' 표시를 붙인다.
+    """
+    is_input = kind == "input"
+    channel_key = "maxInputChannels" if is_input else "maxOutputChannels"
+    label = "입력" if is_input else "출력"
+    hint = "마이크" if is_input else "스피커"
+
+    default_index = None
+    if not is_input:
+        try:
+            default_index = audio.get_default_output_device_info().get("index")
+        except OSError:
+            default_index = None
+
+    print(f"[System] 사용 가능한 {label} 장치 목록:")
     found = False
     for i in range(audio.get_device_count()):
         info = audio.get_device_info_by_index(i)
-        if int(info.get("maxInputChannels", 0)) > 0:
-            found = True
-            print(f"    [{i}] {info['name']} "
-                  f"(채널 {int(info['maxInputChannels'])}, "
-                  f"기본 {int(info['defaultSampleRate'])}Hz)")
+        if int(info.get(channel_key, 0)) <= 0:
+            continue
+        found = True
+        mark = " (기본)" if (not is_input and i == default_index) else ""
+        print(f"    [{i}] {info['name']} "
+              f"(채널 {int(info[channel_key])}, "
+              f"기본 {int(info['defaultSampleRate'])}Hz){mark}")
     if not found:
-        print("    (입력 가능한 장치를 찾지 못했습니다. 마이크 연결/권한을 확인하세요.)")
+        print(f"    ({label} 가능한 장치를 찾지 못했습니다. {hint} 연결/권한을 확인하세요.)")
+
+
+def list_input_devices(audio):
+    """사용 가능한 입력(마이크) 장치 목록을 출력합니다."""
+    _list_devices(audio, "input")
 
 
 def list_output_devices(audio):
     """사용 가능한 출력(스피커) 장치 목록을 출력합니다."""
-    print("[System] 사용 가능한 출력 장치 목록:")
-    try:
-        default_index = audio.get_default_output_device_info().get("index")
-    except OSError:
-        default_index = None
-    found = False
-    for i in range(audio.get_device_count()):
-        info = audio.get_device_info_by_index(i)
-        if int(info.get("maxOutputChannels", 0)) > 0:
-            found = True
-            mark = " (기본)" if i == default_index else ""
-            print(f"    [{i}] {info['name']} "
-                  f"(채널 {int(info['maxOutputChannels'])}, "
-                  f"기본 {int(info['defaultSampleRate'])}Hz){mark}")
-    if not found:
-        print("    (출력 가능한 장치를 찾지 못했습니다. 스피커 연결/권한을 확인하세요.)")
+    _list_devices(audio, "output")
 
 
 def find_device_by_name(audio, name_pattern, kind="input"):
@@ -252,18 +267,6 @@ def save_pcm_wav(path, pcm_bytes, rate=RATE, channels=CHANNELS):
     wf.close()
 
 
-def record_frames(stream, seconds):
-    """입력 스트림에서 지정된 초만큼 녹음하여 PCM 바이트를 반환합니다.
-
-    (레거시) 고정 길이 녹음. 현재 파이프라인은 record_until_silence 를 사용한다.
-    """
-    frames = []
-    for _ in range(0, int(RATE / CHUNK * seconds)):
-        data = stream.read(CHUNK, exception_on_overflow=False)
-        frames.append(data)
-    return b''.join(frames)
-
-
 def record_until_silence(stream, vad, min_seconds, max_seconds,
                          silence_ms, start_timeout_seconds):
     """발화가 끝날 때까지 동적으로 녹음하여 16kHz 모노 PCM 바이트를 반환합니다.
@@ -342,11 +345,7 @@ def _convert_pcm16(raw, src_channels, src_rate, dst_channels, dst_rate):
     samples = np.frombuffer(raw, dtype=np.int16)
 
     # 다중 채널 → 모노 다운믹스
-    if src_channels > 1:
-        usable = (len(samples) // src_channels) * src_channels
-        samples = samples[:usable].reshape(-1, src_channels).mean(axis=1)
-    else:
-        samples = samples.astype(np.float64)
+    samples = _downmix_to_mono(samples, src_channels)
 
     # 레이트 변환
     if src_rate != dst_rate:
@@ -360,20 +359,6 @@ def _convert_pcm16(raw, src_channels, src_rate, dst_channels, dst_rate):
         samples = np.repeat(samples[:, None], dst_channels, axis=1).flatten()
 
     return samples.tobytes()
-
-
-def _supports_output_format(p, device_index, channels, rate, fmt):
-    """출력 장치가 해당 레이트/채널을 직접 지원하는지 조회한다.
-
-    Pa_OpenStream 을 실제로 호출하지 않고 Pa_IsFormatSupported(가벼운 hw params
-    프로브)로만 판별하므로, raw hw 장치의 레이트 거부 시 PortAudio 가 stderr 로
-    쏟아내는 'PaAlsaStream_Configure ... failed' C 레벨 경고가 발생하지 않는다.
-    """
-    try:
-        return p.is_format_supported(rate, output_device=device_index,
-                                     output_channels=channels, output_format=fmt)
-    except ValueError:
-        return False
 
 
 def play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False):
@@ -410,7 +395,7 @@ def play_wav_file(file_path, output_device_index=None, stop_event=None, loop=Fal
     device_index = int(info["index"])
 
     # 1) 장치가 wav 원본 설정을 직접 지원하면 그대로 오픈 (오픈 시도 없이 미리 조회)
-    if _supports_output_format(p, device_index, src_channels, src_rate, fmt):
+    if _supports_format(p, device_index, src_channels, src_rate, fmt, "output"):
         stream = p.open(format=fmt, channels=src_channels, rate=src_rate, output=True,
                         output_device_index=output_device_index)
         out_channels, out_frames = src_channels, frames

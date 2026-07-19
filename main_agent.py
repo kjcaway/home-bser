@@ -66,6 +66,67 @@ def execute_command(user_text, tts):
     tts.speak(f"인지된 음성은 {user_text} 입니다")
 
 
+def run_turn(stream, vad, whisper_model, tts, oww_model, output_device_index, debug_record):
+    """호출어 감지 후의 한 턴(응답음 → 녹음 → STT → 명령 수행 → 대기 복귀)을 처리한다.
+
+    호출어 대기 루프(main)에서 score > 0.5 일 때 호출된다. 처리 중에는 마이크 입력을
+    멈춰 스피커 출력이 되녹음되어 호출어를 재감지하는 것을 막고, 끝나면 버퍼와
+    호출어 특징 버퍼를 비워 다음 턴을 새 상태로 시작한다.
+    """
+    print("\n🔔 [Wake Word 감지!] 👂 듣고 있습니다...")
+
+    # 호출 성공을 사용자에게 알리는 응답음 재생 (녹음 시작 전)
+    play_wav_file(WAKE_RESPONSE_FILE, output_device_index)
+
+    # 응답음 재생(블로킹) 동안에도 마이크 스트림은 계속 돌아 링버퍼에 쌓인다.
+    # 비우지 않으면 record_until_silence 가 그 오래된 오디오부터 읽어 녹음 창이
+    # 앞으로 밀리고(= 응답음이 녹음되고) 사용자 말끝이 잘린다.
+    flush_input_stream(stream)
+
+    # STT 녹음: 고정 길이 대신 VAD 로 발화가 끝날 때까지 동적 녹음.
+    # 짧은 명령은 즉시 종료, 긴 명령은 상한(STT_MAX_RECORD_SECONDS)까지 안 잘림.
+    t_rec = time.monotonic()
+    pcm_bytes = record_until_silence(
+        stream, vad,
+        min_seconds=STT_MIN_RECORD_SECONDS,
+        max_seconds=STT_MAX_RECORD_SECONDS,
+        silence_ms=STT_SILENCE_MS,
+        start_timeout_seconds=STT_START_TIMEOUT_SECONDS,
+    )
+    rec_elapsed = time.monotonic() - t_rec
+
+    # STT/명령 처리(TTS·알람 재생 포함) 동안 마이크 입력을 정지하여
+    # 스피커 출력이 녹음되어 웨이크워드를 재호출하는 것을 방지
+    stream.stop_stream()
+
+    if not pcm_bytes:
+        # 호출만 하고 발화가 없었음 → 조용히 대기 상태로 복귀
+        print("🤫 발화가 감지되지 않았습니다. 대기 상태로 돌아갑니다.")
+    else:
+        audio_sec = len(pcm_bytes) / 2 / RATE
+        # --debug-record 이면 녹음 원본을 wav 로 저장 (오디오 품질 진단용)
+        if debug_record:
+            save_pcm_wav("debug_record.wav", pcm_bytes)
+            print("🐞 녹음 원본 저장: debug_record.wav")
+        print(f"🛑 녹음 완료! (오디오 {audio_sec:.1f}초 / 녹음대기 {rec_elapsed:.1f}초) 생각 중...")
+        t_stt = time.monotonic()
+        user_text = transcribe_pcm(whisper_model, pcm_bytes)
+        print(f"[System] STT 전사 소요: {time.monotonic() - t_stt:.1f}초")
+
+        if user_text:
+            print(f"👤 사용자: {user_text}")
+            execute_command(user_text, tts)
+
+    print("====================================================")
+    print("🎙️ 대기 중...")
+
+    # 마이크 입력 재개 후, 정지 전후로 버퍼에 남아 있던 오디오를 비우고
+    # 호출어 모델의 특징 버퍼도 무음으로 초기화 (직전 호출어 재감지 방지)
+    stream.start_stream()
+    flush_input_stream(stream)
+    reset_wakeword_state(oww_model)
+
+
 def main():
     # ==========================================
     # 1. 환경 설정 (--environment 인자 파싱)
@@ -116,60 +177,8 @@ def main():
             score = get_score(oww_model, audio_data)
 
             if score > 0.5:
-                print("\n🔔 [Wake Word 감지!] 👂 듣고 있습니다...")
-
-                # 호출 성공을 사용자에게 알리는 응답음 재생 (녹음 시작 전)
-                play_wav_file(WAKE_RESPONSE_FILE, output_device_index)
-
-                # 응답음 재생(블로킹) 동안에도 마이크 스트림은 계속 돌아 링버퍼에 쌓인다.
-                # 비우지 않으면 record_frames 가 그 오래된 오디오부터 읽어 녹음 창이
-                # 앞으로 밀리고(= 응답음이 녹음되고) 사용자 말끝이 잘린다.
-                flush_input_stream(stream)
-
-                # STT 녹음: 고정 길이 대신 VAD 로 발화가 끝날 때까지 동적 녹음.
-                # 짧은 명령은 즉시 종료, 긴 명령은 상한(STT_MAX_RECORD_SECONDS)까지 안 잘림.
-                _t_rec = time.monotonic()
-                pcm_bytes = record_until_silence(
-                    stream, vad,
-                    min_seconds=STT_MIN_RECORD_SECONDS,
-                    max_seconds=STT_MAX_RECORD_SECONDS,
-                    silence_ms=STT_SILENCE_MS,
-                    start_timeout_seconds=STT_START_TIMEOUT_SECONDS,
-                )
-                _rec_elapsed = time.monotonic() - _t_rec
-
-                # STT/명령 처리(TTS·알람 재생 포함) 동안 마이크 입력을 정지하여
-                # 스피커 출력이 녹음되어 웨이크워드를 재호출하는 것을 방지
-                stream.stop_stream()
-
-                if not pcm_bytes:
-                    # 호출만 하고 발화가 없었음 → 조용히 대기 상태로 복귀
-                    print("🤫 발화가 감지되지 않았습니다. 대기 상태로 돌아갑니다.")
-                else:
-                    _audio_sec = len(pcm_bytes) / 2 / RATE
-                    # --debug-record 이면 녹음 원본을 wav 로 저장 (오디오 품질 진단용)
-                    if cfg.debug_record:
-                        save_pcm_wav("debug_record.wav", pcm_bytes)
-                        print("🐞 녹음 원본 저장: debug_record.wav")
-                    print(f"🛑 녹음 완료! (오디오 {_audio_sec:.1f}초 / 녹음대기 {_rec_elapsed:.1f}초) 생각 중...")
-                    _t_stt = time.monotonic()
-                    user_text = transcribe_pcm(whisper_model, pcm_bytes)
-                    print(f"[System] STT 전사 소요: {time.monotonic() - _t_stt:.1f}초")
-
-                    if user_text:
-                        print(f"👤 사용자: {user_text}")
-
-                        # 코어: 사용자 명령 수행
-                        execute_command(user_text, tts)
-
-                print("====================================================")
-                print("🎙️ 대기 중...")
-
-                # 마이크 입력 재개 후, 정지 전후로 버퍼에 남아 있던 오디오를 비우고
-                # 호출어 모델의 특징 버퍼도 무음으로 초기화 (직전 호출어 재감지 방지)
-                stream.start_stream()
-                flush_input_stream(stream)
-                reset_wakeword_state(oww_model)
+                run_turn(stream, vad, whisper_model, tts, oww_model,
+                         output_device_index, cfg.debug_record)
 
     except KeyboardInterrupt:
         print("\n[System] 시스템을 종료합니다.")

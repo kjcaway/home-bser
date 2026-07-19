@@ -15,7 +15,6 @@ CHUNK = 1280
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
-RECORD_SECONDS = 5   # (레거시) 고정 길이 녹음용. 현재 파이프라인은 VAD 동적 녹음을 사용.
 TTS_OUTPUT_FILE = "response.wav"
 WAKE_RESPONSE_FILE = "soundfile/res0.wav"   # 호출어("알렉사") 감지 성공 시 사용자에게 들려줄 응답음
 TIMER_ALARM_FILE = "soundfile/timer_wakeup.wav"   # 타이머 종료 시 재생할 알람음
