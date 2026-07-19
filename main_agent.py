@@ -10,6 +10,7 @@ from agent.config import (
     STT_MAX_RECORD_SECONDS,
     STT_SILENCE_MS,
     STT_START_TIMEOUT_SECONDS,
+    STT_MODEL_SIZE,
     parse_device_args,
 )
 from agent.audio_io import (
@@ -92,7 +93,7 @@ def main():
     print("[System] 모든 로컬 AI 모델을 불러오는 중입니다. 잠시만 기다려주세요...")
 
     oww_model = load_wakeword_model("alexa")
-    whisper_model = load_stt_model(cfg.device, cfg.stt_compute_type)
+    whisper_model = load_stt_model(cfg.device, cfg.stt_compute_type, STT_MODEL_SIZE)
     vad = load_vad()   # 발화 종료 감지(endpointing)용 Silero VAD
     tts = TextToSpeech(cfg.device, output_device_index=output_device_index)
 

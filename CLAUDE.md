@@ -76,7 +76,7 @@ The code is split into an `agent/` package with one module per pipeline stage; `
 - `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes 스킬에서 사용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
-- `agent/stt.py` — `load_stt_model()` (faster-whisper `small`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
+- `agent/stt.py` — `load_stt_model()` (faster-whisper, model size from `STT_MODEL_SIZE` in `config.py`, currently `medium`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
@@ -140,6 +140,8 @@ The main loop logs per-turn timing so a slow or wrong transcription can be triag
 `--debug-record` dumps each turn's raw mic capture to `debug_record.wav`. Play it back (`afplay debug_record.wav` on macOS) to check the audio itself first: garbled/noisy → mic path (native-conversion resample, wrong device); clean but mis-transcribed → STT model/params. A clean TTS-generated wav (`text_to_wav.py`) transcribed via `transcribe_pcm` on the same machine is a fast baseline — if that is fast and correct while the live turn is slow and wrong, the pipeline's audio is the culprit, not the model.
 
 Note: ctranslate2 (faster-whisper's backend) has **no Metal/GPU support on Apple Silicon**, so on a Mac STT is always CPU-only regardless of `--environment`.
+
+**Model size (`STT_MODEL_SIZE` in `config.py`, currently `medium`):** `small` transcribes a 5 s clip in ~1.3 s on an 8-core CPU but mis-hears conversational Korean ("수도 어디야" → "수돈어디아"); `medium` is noticeably more accurate at ~4–6 s for the same clip — still interactive, and the prod machine has ample headroom. `large-v3` is more accurate again but too slow for interactive use on CPU. The first run with a new size **downloads** the model (medium ≈ 1.5 GB, one-time ~2–3 min) and then caches it; steady-state load is fast.
 
 ### Intent handling (current behavior)
 

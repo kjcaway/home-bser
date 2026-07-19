@@ -8,7 +8,11 @@ HOTWORDS = "알렉사 타이머 알람 스톱워치 1분 3분 5분 10초 30초"
 
 
 def load_stt_model(device, compute_type, model_size="small"):
-    """Faster-Whisper STT 모델을 로드합니다."""
+    """Faster-Whisper STT 모델을 로드합니다.
+
+    메인 파이프라인(main_agent)은 config.STT_MODEL_SIZE(현재 medium)를 넘겨 호출한다.
+    기본값 small 은 단독 import 하는 경량 용도용 폴백일 뿐이다.
+    """
     return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
