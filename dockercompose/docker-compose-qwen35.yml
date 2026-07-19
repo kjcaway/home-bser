@@ -1,17 +1,21 @@
-# vLLM + Qwen3 (4B) — 8GB VRAM 운영환경용 docker-compose
+# vLLM + Qwen3-8B-AWQ — 8GB VRAM 운영환경용 docker-compose
 #
-# 하는 일: vLLM OpenAI 호환 서버로 Qwen3-4B 를 서빙한다.
+# 하는 일: vLLM OpenAI 호환 서버로 Qwen3-8B 의 AWQ 4bit 사전 양자화판을 서빙한다.
 # gemma 파일과 동일하게 OpenAI 호환 /v1 엔드포인트를 제공하므로 hermes_api.py 가 그대로 붙는다.
 #
 # 모델 태그 메모:
-#   - 요청은 "qwen3.5:4b" 였으나 (2026-01 기준) Qwen3.5-4B 는 확인되지 않는 태그다.
-#     Qwen 계열 최신은 Qwen3 이고 4B 는 Qwen/Qwen3-4B → 이를 기본값으로 채택.
-#     환경에 Qwen3.5-4B 가 실제로 있으면 아래 --model 한 줄만 그 repo id 로 바꾸면 된다.
+#   - Qwen 공식 AWQ 사전 양자화 repo = Qwen/Qwen3-8B-AWQ 를 채택.
+#   - bitsandbytes 인플라이트 양자화(구버전)와 달리 AWQ 는 "이미 4bit 로 양자화된" 가중치를
+#     받아 로딩만 하므로 기동이 빠르고 재현성이 좋다.
 #   - Qwen3 는 gated 가 아니라 HF 토큰 없이 다운로드된다 (gemma 와 다른 점).
 #
 # VRAM 메모:
-#   - Qwen3-4B 를 bf16 로 올리면 가중치만 ~8GB → 8GB 카드엔 KV캐시 자리가 없다.
-#   - 그래서 bitsandbytes 4bit 로 양자화(~3GB)해 KV캐시 여유를 확보. (gemma 파일과 동일 전략)
+#   - Qwen3-8B 를 bf16 로 올리면 가중치만 ~16GB → 8GB 카드엔 절대 안 올라간다.
+#   - AWQ 4bit 가중치는 ~5.5GB → KV캐시 여유가 4B 대비 빠듯하다.
+#     OOM 시 --max-model-len / --gpu-memory-utilization 을 낮출 것.
+#   - 커널 주의: RTX 2060(Turing, CC 7.5)은 AWQ Marlin 커널(Ampere CC 8.0+ 전용)을 못 쓴다.
+#     그래서 --quantization 을 awq_marlin(자동 선택)이 아니라 명시적으로 awq 로 고정한다.
+#     Ampere 이상 카드로 옮기면 awq_marlin 으로 바꿔 더 빠른 커널을 쓸 수 있다.
 #
 # 사전 준비:
 #   1) NVIDIA 드라이버 + nvidia-container-toolkit
@@ -43,13 +47,11 @@ services:
     ipc: host
     command:
       - --model
-      - Qwen/Qwen3-4B
+      - Qwen/Qwen3-8B-AWQ
       - --served-model-name
-      - qwen3-4b                 # OpenAI API model 필드 이름 (.env 의 HERMES_MODEL 과 일치시킬 것)
+      - qwen3-8b                 # OpenAI API model 필드 이름 (.env 의 HERMES_MODEL 과 일치시킬 것)
       - --quantization
-      - bitsandbytes             # 4bit 인플라이트 양자화 (8GB 적합의 핵심)
-      - --load-format
-      - bitsandbytes
+      - awq                      # 사전 AWQ 4bit. Turing(2060)이라 Marlin 대신 기본 awq 커널 고정
       - --max-model-len
       - "8192"                   # 컨텍스트 길이 = KV캐시 크기에 비례. 8GB 라 과하게 늘리지 말 것
       - --gpu-memory-utilization
