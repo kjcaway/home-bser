@@ -129,6 +129,7 @@ class RunConfig(NamedTuple):
     output_device_name: str | None
     output_device_index: int | None
     list_devices: bool
+    debug_record: bool
 
 
 def parse_device_args():
@@ -154,6 +155,11 @@ def parse_device_args():
         "--list-devices",
         action="store_true",
         help="사용 가능한 입력(마이크)/출력(스피커) 장치 목록을 출력하고 종료",
+    )
+    parser.add_argument(
+        "--debug-record",
+        action="store_true",
+        help="매 턴 녹음 원본을 debug_record.wav 로 저장 (오디오 품질 진단용)",
     )
     args = parser.parse_args()
 
@@ -185,4 +191,5 @@ def parse_device_args():
         output_device_name=output_device_name,
         output_device_index=preset["output_device_index"],
         list_devices=args.list_devices,
+        debug_record=args.debug_record,
     )

@@ -20,6 +20,7 @@ from agent.audio_io import (
     list_input_devices,
     list_output_devices,
     resolve_devices,
+    save_pcm_wav,
 )
 import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
@@ -145,6 +146,10 @@ def main():
                     print("🤫 발화가 감지되지 않았습니다. 대기 상태로 돌아갑니다.")
                 else:
                     _audio_sec = len(pcm_bytes) / 2 / RATE
+                    # --debug-record 이면 녹음 원본을 wav 로 저장 (오디오 품질 진단용)
+                    if cfg.debug_record:
+                        save_pcm_wav("debug_record.wav", pcm_bytes)
+                        print("🐞 녹음 원본 저장: debug_record.wav")
                     print(f"🛑 녹음 완료! (오디오 {_audio_sec:.1f}초 / 녹음대기 {_rec_elapsed:.1f}초) 생각 중...")
                     _t_stt = time.monotonic()
                     user_text = transcribe_pcm(whisper_model, pcm_bytes)

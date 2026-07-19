@@ -23,7 +23,10 @@ python main_agent.py                    # default: dev
 python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
 python main_agent.py --environment prod # 운영환경: cpu STT/TTS, USB 장치를 이름으로 탐색
 python main_agent.py --list-devices     # 입출력 장치 이름/인덱스 확인
+python main_agent.py --debug-record     # 매 턴 녹음 원본을 debug_record.wav 로 저장 (진단용)
 ```
+
+`--debug-record` (a plain `argparse` store-true flag, off by default; carried on `RunConfig.debug_record`) saves each turn's raw recording to `debug_record.wav` in the working directory — a diagnostic switch for when STT is slow or mis-transcribes (see "Diagnostics" below). Unlike `--list-devices` it does **not** exit; it runs the normal pipeline with the extra dump.
 
 `--environment` (choices `dev`/`prod`, **default `dev`**) is parsed with `argparse` and selects a preset that drives the compute device, the microphone, and the speaker. Presets live in the `ENVIRONMENTS` dict in `agent/config.py`:
 
@@ -69,7 +72,7 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `record_frames()` (레거시 고정 길이), `play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False)` (`stop_event` set 시 청크 경계에서 즉시 중단, `loop`=반복 재생), `_convert_pcm16()`, `_supports_input_format()` / `_supports_output_format()` (오픈 전 레이트 지원 조회로 ALSA 경고 회피).
+- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `record_frames()` (레거시 고정 길이), `play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False)` (`stop_event` set 시 청크 경계에서 즉시 중단, `loop`=반복 재생), `save_pcm_wav(path, pcm_bytes, rate, channels)` (16-bit PCM → wav, `--debug-record` 진단용), `_convert_pcm16()`, `_supports_input_format()` / `_supports_output_format()` (오픈 전 레이트 지원 조회로 ALSA 경고 회피).
 - `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes 스킬에서 사용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
@@ -121,6 +124,22 @@ Playback has the mirror-image problem: the wav files (`res0.wav`, the TTS `respo
 2. If unsupported, it opens at the output device's **native** rate / channels and converts the 16-bit PCM in software via `_convert_pcm16()` — mono downmix → `scipy.signal.resample_poly` → duplicate up to the target channel count. This path logs `[System] 재생 네이티브 변환: …Hz/…ch → …Hz/…ch`.
 
 `_convert_pcm16()` only handles 16-bit PCM (all wavs in this repo are 16-bit); a non-16-bit file that the device can't open natively is skipped with a message rather than crashing. `play_wav_file()` also accepts an optional `output_device_index` (defaults to the system default output device).
+
+### Diagnostics (slow / wrong STT)
+
+The main loop logs per-turn timing so a slow or wrong transcription can be triaged without guessing:
+
+```
+🛑 녹음 완료! (오디오 5.2초 / 녹음대기 5.2초) 생각 중...
+[System] STT 전사 소요: 17.3초
+```
+
+- **오디오 N초** — actual captured speech length (`len(pcm_bytes)/2/RATE`). Pinned near `STT_MAX_RECORD_SECONDS` (15 s) means VAD never detected end-of-speech and recorded to the hard cap.
+- **STT 전사 소요** — faster-whisper transcription wall time. Much larger than the audio length (e.g. 17 s for 5 s audio) is abnormal. The usual root cause is **bad input audio**, not STT settings: faster-whisper retries a low-confidence segment across a temperature-fallback ladder (up to ~6 decodes), so garbled audio makes it **slow and wrong at the same time** — the two symptoms share one cause.
+
+`--debug-record` dumps each turn's raw mic capture to `debug_record.wav`. Play it back (`afplay debug_record.wav` on macOS) to check the audio itself first: garbled/noisy → mic path (native-conversion resample, wrong device); clean but mis-transcribed → STT model/params. A clean TTS-generated wav (`text_to_wav.py`) transcribed via `transcribe_pcm` on the same machine is a fast baseline — if that is fast and correct while the live turn is slow and wrong, the pipeline's audio is the culprit, not the model.
+
+Note: ctranslate2 (faster-whisper's backend) has **no Metal/GPU support on Apple Silicon**, so on a Mac STT is always CPU-only regardless of `--environment`.
 
 ### Intent handling (current behavior)
 

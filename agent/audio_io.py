@@ -242,6 +242,16 @@ def open_input_stream(device_index=None):
     return audio, stream
 
 
+def save_pcm_wav(path, pcm_bytes, rate=RATE, channels=CHANNELS):
+    """16-bit PCM 바이트를 wav 파일로 저장한다 (녹음 디버그용)."""
+    wf = wave.open(path, "wb")
+    wf.setnchannels(channels)
+    wf.setsampwidth(2)   # 16-bit
+    wf.setframerate(rate)
+    wf.writeframes(pcm_bytes)
+    wf.close()
+
+
 def record_frames(stream, seconds):
     """입력 스트림에서 지정된 초만큼 녹음하여 PCM 바이트를 반환합니다.
 
