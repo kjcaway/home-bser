@@ -9,12 +9,20 @@
 
 설정은 프로젝트 루트의 `.env` 파일에서 읽습니다 (`.env.example` 참고):
 
+    HERMES_ENABLED=1
     HERMES_BASE_URL=http://127.0.0.1:8642/v1
     HERMES_API_KEY=...
     HERMES_MODEL=qwen3:8b
     HERMES_TIMEOUT=30
 
-`HERMES_API_KEY` 가 없으면 스킬은 비활성 상태가 되어 False 를 반환합니다.
+on/off 는 `HERMES_ENABLED` 로 명시적으로 제어합니다:
+
+- 켜짐(`1`/`true`/`yes`/`on`) → 기존처럼 hermes 에 질의합니다. (`HERMES_API_KEY` 도
+  있어야 OpenAI SDK 를 만들 수 있습니다.)
+- 꺼짐(`0`/`false`/`no`/`off`) → 스킬이 즉시 False 를 반환하여 hermes API 를 호출하는
+  코드(대기음 재생·`ask()`)가 **아예 실행되지 않고** 기존 에코 폴백이 동작합니다.
+- `HERMES_ENABLED` 미설정 → 하위호환을 위해 `HERMES_API_KEY` 존재 여부로 판단합니다.
+
 hermes 가 없는 개발환경(dev)에서는 .env 를 두지 않으면 되고, 그러면 기존
 에코 폴백이 그대로 동작합니다.
 """
@@ -45,6 +53,10 @@ SYSTEM_PROMPT = (
 # 호출 실패 시 사용자에게 들려줄 안내 문구
 ERROR_MESSAGE = "죄송합니다. 지금은 답변을 가져오지 못했습니다."
 
+# HERMES_ENABLED 로 인정하는 truthy/falsy 문자열
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
 # OpenAI 클라이언트는 최초 사용 시 한 번만 만들어 재사용한다.
 _client = None
 
@@ -58,8 +70,26 @@ def strip_think(text: str) -> str:
 
 
 def is_enabled() -> bool:
-    """.env 에 HERMES_API_KEY 가 설정되어 있으면 이 스킬을 사용한다."""
+    """.env 의 HERMES_ENABLED 로 이 스킬의 on/off 를 판단한다.
+
+    - HERMES_ENABLED 가 truthy → 켜짐 (단, OpenAI SDK 생성에 HERMES_API_KEY 도 필요)
+    - HERMES_ENABLED 가 falsy → 꺼짐 (hermes API 호출 코드가 실행되지 않음)
+    - HERMES_ENABLED 미설정 → 하위호환: HERMES_API_KEY 존재 여부로 판단
+    """
     load_env_file()
+
+    flag = os.environ.get("HERMES_ENABLED")
+    if flag is not None and flag.strip() != "":
+        normalized = flag.strip().lower()
+        if normalized in _FALSE_VALUES:
+            return False
+        if normalized in _TRUE_VALUES:
+            return bool(os.environ.get("HERMES_API_KEY"))
+        # 인식할 수 없는 값은 안전하게 꺼짐으로 처리
+        print(f"[경고] HERMES_ENABLED 값을 해석할 수 없어 hermes 를 끕니다: {flag!r}")
+        return False
+
+    # HERMES_ENABLED 미설정 → 기존 동작(키 존재 여부)
     return bool(os.environ.get("HERMES_API_KEY"))
 
 

@@ -5,12 +5,16 @@
 바꿔 호출합니다.
 
 설정은 hermes_api 스킬과 동일하게 프로젝트 루트의 `.env` 에서 읽습니다
-(`HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_TIMEOUT`).
+(`HERMES_ENABLED`, `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_TIMEOUT`).
 우선순위는 CLI 인자 > .env > 기본값 순입니다.
+
+`HERMES_ENABLED` 가 꺼짐(`0`/`false`/`no`/`off`)이면 스킬과 동일하게 hermes 를
+호출하지 않고 종료합니다. 스위치와 무관하게 연결만 확인하려면 `--force` 를 씁니다.
 
 사용 예:
     python test_hermes_api.py                          # .env 설정으로 테스트
     python test_hermes_api.py "서울의 수도는 어디야?"      # 질문 직접 지정
+    python test_hermes_api.py --force                  # HERMES_ENABLED 무시하고 강제 테스트
     python test_hermes_api.py --base-url http://127.0.0.1:8642/v1 --model qwen3:8b
 """
 
@@ -23,6 +27,7 @@ import time
 from openai import OpenAI
 
 from agent.config import load_env_file
+from agent.skills.hermes_api import _FALSE_VALUES, _TRUE_VALUES
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8642/v1"
 DEFAULT_MODEL = "qwen3:8b"
@@ -70,7 +75,24 @@ def main():
                         help=f"모델 이름 (기본값: {env_model})")
     parser.add_argument("--timeout", type=float, default=env_timeout,
                         help=f"응답 대기 제한 시간(초) (기본값: {env_timeout})")
+    parser.add_argument("--force", action="store_true",
+                        help="HERMES_ENABLED 가 꺼져 있어도 무시하고 강제로 테스트")
     args = parser.parse_args()
+
+    # HERMES_ENABLED 로 on/off 를 판단(스킬과 동일). 명시적으로 꺼져 있으면
+    # 호출하지 않고 종료한다. --force 로 스위치를 무시할 수 있다.
+    if not args.force:
+        flag = os.environ.get("HERMES_ENABLED")
+        if flag is not None and flag.strip() != "":
+            normalized = flag.strip().lower()
+            if normalized in _FALSE_VALUES:
+                print("[System] HERMES_ENABLED 가 꺼져 있어 테스트를 건너뜁니다.")
+                print("         연결만 확인하려면 --force 를, 활성화하려면 .env 에서 HERMES_ENABLED=1 로 두세요.")
+                return
+            if normalized not in _TRUE_VALUES:
+                print(f"[경고] HERMES_ENABLED 값을 해석할 수 없어 테스트를 건너뜁니다: {flag!r}")
+                print("       연결만 확인하려면 --force 를 쓰세요.")
+                return
 
     # hermes 는 인증을 요구하지 않지만 SDK 가 api_key 를 필수로 요구한다.
     # .env 의 HERMES_API_KEY 가 있으면 쓰고, 없으면 더미 값을 넣는다.
