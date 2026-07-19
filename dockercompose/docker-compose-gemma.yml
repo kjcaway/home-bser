@@ -57,6 +57,11 @@ services:
       - "8"                      # 동시 처리 시퀀스 수. 홈 에이전트는 1인용이라 작게
       - --dtype
       - half                     # RTX 2060(Turing, CC 7.5)은 bf16 미지원 → float16 사용
+      # 클라이언트가 tool_choice:"auto" + tools 를 보내면 이 두 플래그 없이는 400.
+      # gemma-3 계열은 tool-call 파서로 pythonic 을 쓴다 (Qwen 의 hermes 와 다름).
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - pythonic
     deploy:
       resources:
         reservations:
