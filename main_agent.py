@@ -1,7 +1,10 @@
+import time
+
 import numpy as np
 
 from agent.config import (
     CHUNK,
+    RATE,
     WAKE_RESPONSE_FILE,
     STT_MIN_RECORD_SECONDS,
     STT_MAX_RECORD_SECONDS,
@@ -123,6 +126,7 @@ def main():
 
                 # STT 녹음: 고정 길이 대신 VAD 로 발화가 끝날 때까지 동적 녹음.
                 # 짧은 명령은 즉시 종료, 긴 명령은 상한(STT_MAX_RECORD_SECONDS)까지 안 잘림.
+                _t_rec = time.monotonic()
                 pcm_bytes = record_until_silence(
                     stream, vad,
                     min_seconds=STT_MIN_RECORD_SECONDS,
@@ -130,6 +134,7 @@ def main():
                     silence_ms=STT_SILENCE_MS,
                     start_timeout_seconds=STT_START_TIMEOUT_SECONDS,
                 )
+                _rec_elapsed = time.monotonic() - _t_rec
 
                 # STT/명령 처리(TTS·알람 재생 포함) 동안 마이크 입력을 정지하여
                 # 스피커 출력이 녹음되어 웨이크워드를 재호출하는 것을 방지
@@ -139,8 +144,11 @@ def main():
                     # 호출만 하고 발화가 없었음 → 조용히 대기 상태로 복귀
                     print("🤫 발화가 감지되지 않았습니다. 대기 상태로 돌아갑니다.")
                 else:
-                    print("🛑 녹음 완료! 생각 중...")
+                    _audio_sec = len(pcm_bytes) / 2 / RATE
+                    print(f"🛑 녹음 완료! (오디오 {_audio_sec:.1f}초 / 녹음대기 {_rec_elapsed:.1f}초) 생각 중...")
+                    _t_stt = time.monotonic()
                     user_text = transcribe_pcm(whisper_model, pcm_bytes)
+                    print(f"[System] STT 전사 소요: {time.monotonic() - _t_stt:.1f}초")
 
                     if user_text:
                         print(f"👤 사용자: {user_text}")
