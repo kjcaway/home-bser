@@ -10,9 +10,12 @@
 #   - Qwen3 는 gated 가 아니라 HF 토큰 없이 다운로드된다 (gemma 와 다른 점).
 #
 # VRAM 메모:
-#   - Qwen3-8B 를 bf16 로 올리면 가중치만 ~16GB → 8GB 카드엔 절대 안 올라간다.
-#   - AWQ 4bit 가중치는 ~5.5GB → KV캐시 여유가 4B 대비 빠듯하다.
-#     OOM 시 --max-model-len / --gpu-memory-utilization 을 낮출 것.
+#   - 이 카드는 RTX 2060 6GB (vLLM 실측 가용 ~5.61GB). AWQ 4bit 가중치만 ~4.66GB 를 먹는다.
+#   - 남는 ~0.9GB 로 KV캐시 + 활성값 + CUDA그래프를 다 감당해야 해 매우 빠듯하다. 그래서:
+#       * --enforce-eager 로 CUDA 그래프 캡처(~1GB+) 를 끈다 (6GB 에선 사실상 필수).
+#       * --max-model-len 을 2048 로, --max-num-seqs 를 1 로 낮춰 KV캐시를 최소화한다.
+#       * --gpu-memory-utilization 0.95 로 헤드룸을 줄인다.
+#     그래도 OOM 이면 --max-model-len 을 1024 로 더 낮추거나, 4B(더 안전) 로 되돌릴 것.
 #   - 커널 주의: RTX 2060(Turing, CC 7.5)은 AWQ Marlin 커널(Ampere CC 8.0+ 전용)을 못 쓴다.
 #     그래서 --quantization 을 awq_marlin(자동 선택)이 아니라 명시적으로 awq 로 고정한다.
 #     Ampere 이상 카드로 옮기면 awq_marlin 으로 바꿔 더 빠른 커널을 쓸 수 있다.
@@ -53,11 +56,12 @@ services:
       - --quantization
       - awq                      # 사전 AWQ 4bit. Turing(2060)이라 Marlin 대신 기본 awq 커널 고정
       - --max-model-len
-      - "8192"                   # 컨텍스트 길이 = KV캐시 크기에 비례. 8GB 라 과하게 늘리지 말 것
+      - "2048"                   # KV캐시=컨텍스트 길이 비례. 6GB(실측 5.61) 라 짧게 (OOM 대응)
       - --gpu-memory-utilization
-      - "0.90"
+      - "0.95"                   # 6GB 카드라 헤드룸을 최소화해 KV캐시 확보
       - --max-num-seqs
-      - "8"                      # 1인용 홈 에이전트라 작게
+      - "1"                      # 1인용 홈 에이전트 → 동시 시퀀스 1 (KV·활성 메모리 절약)
+      - --enforce-eager          # CUDA 그래프 캡처 비활성(~1GB+ 절약). 6GB 에선 필수 수준
       - --dtype
       - half                     # RTX 2060(Turing, CC 7.5)은 bf16 미지원 → float16 사용
       # 클라이언트가 tool_choice:"auto" + tools 를 보내면 이 두 플래그 없이는 400.
