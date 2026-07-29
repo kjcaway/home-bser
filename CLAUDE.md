@@ -47,13 +47,20 @@ STT/TTS both run on CPU in every environment: CPU was judged the better fit for 
 
 ### Device selection (why by name, not index)
 
-PortAudio assigns device indices in enumeration order, so a USB mic/speaker's index **changes across reboots and re-plugs** — a hardcoded `2` breaks. Presets therefore carry `input_device_name` / `output_device_name`: a case-insensitive **substring** of the device name, resolved to a live index at startup by `resolve_devices()` in `agent/audio_io.py` (called once in `main()`, before models load).
+PortAudio assigns device indices in enumeration order, so a USB mic/speaker's index **changes across reboots and re-plugs** — a hardcoded `2` breaks. Presets therefore carry `input_device_name` / `output_device_name`: a case-insensitive **prefix** of the device name, resolved to a live index at startup by `resolve_devices()` in `agent/audio_io.py` (called once in `main()`, before models load).
 
 - No name (dev) → the preset's `input_device_index` / `output_device_index` is used as-is.
-- Name matches → that index is used, and the match is logged. Multiple matches → the first is picked and the rest are logged.
+- Name matches → that index is used, and the match is logged (with which rule matched). Multiple matches → the first is picked and the rest are logged.
 - Name matches nothing → warns, prints the device list, and falls back to the preset index (`None` = system default), so a missing USB device degrades instead of crashing.
 
-Patterns are overridable via `.env` (`AUDIO_INPUT_NAME`, `AUDIO_OUTPUT_NAME`) so prod devices can change without touching code; an empty value falls back to the preset. Run `--list-devices` on the target machine to see the real names. The resolved index is passed to `open_input_stream(device_index)`; if opening still fails, the available input devices are listed to aid diagnosis.
+**Matching rule (`find_device_by_name`), and why it isn't an exact match:** ALSA appends a `(hw:<card>,<device>)` tag to the device name, and on a server the **card number changes on every boot** — the same mic shows up as `USB PnP Sound Device: Audio (hw:1,0)` and then `(hw:2,0)`. Two things follow:
+
+1. Comparison is **prefix**, not exact, so a pattern like `USB PnP Sound Device` matches regardless of what trails it.
+2. Both the pattern and the device name are normalized by `_normalize_device_name()` (strip → drop a trailing `(hw:N,M)` → lowercase) before comparing, so a pattern pasted **with** a stale hw tag still matches. Prefix matching alone does not cover this case: the pattern would be longer than the current name and fail.
+
+If no device matches by prefix, it falls back to the old **substring** match (logged as `부분일치 폴백`). That keeps the `prod` preset default `"USB"` working on machines whose device name carries it mid-string (`Generic USB Audio Device`), which a prefix-only rule would silently break.
+
+Patterns are overridable via `.env` (`AUDIO_INPUT_NAME`, `AUDIO_OUTPUT_NAME`) so prod devices can change without touching code; an empty value falls back to the preset. Run `--list-devices` on the target machine to see the real names — the `(hw:N,M)` tail can be left off. The resolved index is passed to `open_input_stream(device_index)`; if opening still fails, the available input devices are listed to aid diagnosis.
 
 Run standalone utilities:
 

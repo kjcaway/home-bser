@@ -58,8 +58,10 @@ STT_MODEL_SIZE = "medium"
 #   남겨둔다 — LLM 스테이지가 추가되면 그때 별도 device 설정을 둔다.
 #
 # input_device_name / output_device_name:
-#   장치 이름의 부분일치 패턴(대소문자 무시). PyAudio 인덱스는 USB 재연결/부팅 순서에
-#   따라 바뀌므로 운영환경은 인덱스 대신 이름으로 장치를 찾는다. 실제 이름은
+#   장치 이름의 접두사(prefix) 패턴(대소문자 무시, 일치 규칙은 audio_io.py 의
+#   find_device_by_name 참고). PyAudio 인덱스는 USB 재연결/부팅 순서에 따라 바뀌므로
+#   운영환경은 인덱스 대신 이름으로 장치를 찾는다. 이름 끝의 ALSA '(hw:N,M)' 번호도
+#   부팅마다 바뀌므로 비교에서 제외한다. 실제 이름은
 #   `python main_agent.py --list-devices` 로 확인하고, 코드 수정 없이 바꾸려면
 #   .env 의 AUDIO_INPUT_NAME / AUDIO_OUTPUT_NAME 으로 덮어쓴다.
 # input_device_index / output_device_index:

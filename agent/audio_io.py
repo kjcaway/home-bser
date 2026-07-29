@@ -1,4 +1,5 @@
 import os
+import re
 import wave
 from math import gcd
 
@@ -166,35 +167,60 @@ def list_output_devices(audio):
     _list_devices(audio, "output")
 
 
+# ALSA 장치 이름 끝에 붙는 '(hw:카드,디바이스)' 번호. 같은 하드웨어라도 부팅/재연결
+# 때마다 카드 번호가 바뀌므로(예: "USB PnP Sound Device: Audio (hw:1,0)" →
+# "... (hw:2,0)"), 이름 비교에서는 이 꼬리표를 떼고 본다.
+_HW_SUFFIX_RE = re.compile(r"\s*\(hw:\d+(?:,\d+)?\)\s*$")
+
+
+def _normalize_device_name(name):
+    """장치 이름 비교용 정규화: 앞뒤 공백 제거 → 끝의 '(hw:N,M)' 제거 → 소문자화."""
+    return _HW_SUFFIX_RE.sub("", str(name).strip()).lower()
+
+
 def find_device_by_name(audio, name_pattern, kind="input"):
-    """이름에 name_pattern 이 포함된 첫 번째 입/출력 장치의 인덱스를 반환한다.
+    """이름이 name_pattern 으로 시작하는 첫 번째 입/출력 장치의 인덱스를 반환한다.
 
     USB 장치의 PyAudio 인덱스는 연결 순서/부팅마다 바뀌므로 인덱스를 고정값으로
     쓸 수 없다. 반면 장치 이름은 하드웨어에 따라오므로 이름으로 찾는다.
-    대소문자를 무시한 부분일치이며, 못 찾으면 None 을 반환한다.
+
+    비교는 대소문자를 무시한 **접두사(prefix) 일치**다. 완전일치를 요구하면 ALSA 가
+    이름 끝에 붙이는 '(hw:N,M)' 번호가 부팅마다 바뀌어 매칭이 깨지기 때문이다
+    (그래서 패턴/장치 이름 양쪽 모두 _normalize_device_name 으로 이 꼬리표를 떼고
+    비교한다 — .env 에 hw 번호까지 통째로 붙여넣은 값도 매칭된다).
+
+    접두사로 일치하는 장치가 하나도 없을 때만 기존 동작인 부분일치로 폴백한다
+    (프리셋 기본값 "USB" 처럼 이름 중간에 들어가는 패턴이 깨지지 않도록).
+    못 찾으면 None 을 반환한다.
     """
     channel_key = "maxInputChannels" if kind == "input" else "maxOutputChannels"
-    needle = name_pattern.lower()
+    needle = _normalize_device_name(name_pattern)
 
-    matches = []
+    prefix_matches = []
+    substring_matches = []
     for i in range(audio.get_device_count()):
         info = audio.get_device_info_by_index(i)
         if int(info.get(channel_key, 0)) <= 0:
             continue
-        if needle in str(info["name"]).lower():
-            matches.append((i, info["name"]))
+        haystack = _normalize_device_name(info["name"])
+        if haystack.startswith(needle):
+            prefix_matches.append((i, info["name"]))
+        elif needle in haystack:
+            substring_matches.append((i, info["name"]))
 
+    matches = prefix_matches or substring_matches
     if not matches:
         return None
 
+    how = "접두사 일치" if prefix_matches else "부분일치 폴백"
     index, name = matches[0]
     label = "입력" if kind == "input" else "출력"
     if len(matches) > 1:
         others = ", ".join(f"[{i}] {n}" for i, n in matches[1:])
         print(f"[System] {label} 장치 이름 '{name_pattern}' 에 여러 장치가 일치합니다 "
-              f"(선택: [{index}] {name} / 나머지: {others})")
+              f"({how} / 선택: [{index}] {name} / 나머지: {others})")
     else:
-        print(f"[System] {label} 장치 이름 '{name_pattern}' → [{index}] {name}")
+        print(f"[System] {label} 장치 이름 '{name_pattern}' → [{index}] {name} ({how})")
     return index
 
 
