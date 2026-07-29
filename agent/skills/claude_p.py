@@ -126,9 +126,19 @@ def build_command() -> list:
         cmd += ["--append-system-prompt", SYSTEM_PROMPT]
 
     # 웹 검색 도구만 허용. 빈 값으로 두면 도구 없이 모델 지식만으로 답한다.
-    allowed_tools = os.environ.get("CLAUDE_CLI_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS)
+    #
+    # 주의: 빈 값일 때 --allowedTools 를 그냥 생략하면 '도구 없음'이 되지 않는다.
+    # 도구 목록은 그대로 살아 있어서 모델이 WebSearch/WebFetch 를 호출하고,
+    # 허용 목록에 없으니 런타임에 거부당한다("Claude requested permissions to use
+    # WebFetch, but you haven't granted it yet."). 턴만 낭비하고 답변은
+    # "권한이 없어서 확인하지 못했습니다"가 되는데, --output-format json 은 최종
+    # 텍스트만 주므로 로그에서 원인이 보이지 않는다. 도구를 진짜 끄려면
+    # --tools "" 로 도구 목록 자체를 비워야 한다 (test-claude-cli.py 와 같은 방식).
+    allowed_tools = os.environ.get("CLAUDE_CLI_ALLOWED_TOOLS", DEFAULT_ALLOWED_TOOLS).strip()
     if allowed_tools:
         cmd += ["--allowedTools", allowed_tools]
+    else:
+        cmd += ["--tools", ""]
 
     return cmd
 
@@ -166,6 +176,14 @@ def ask(question: str) -> str:
 
     if payload.get("is_error"):
         raise RuntimeError(f"claude 오류 결과: {payload.get('subtype', 'unknown')}")
+
+    # num_turns 는 도구를 썼는지 판별하는 가장 싼 지표다. 1 이면 모델이 곧바로
+    # 답한 것(도구 미사용), 2 이상이면 도구를 호출하고 그 결과로 다시 답한 것.
+    # 웹 검색이 필요한 질문인데 계속 1 이 찍히면 도구가 꺼졌거나 거부당하는
+    # 상태이므로 CLAUDE_CLI_ALLOWED_TOOLS 설정을 확인한다.
+    num_turns = payload.get("num_turns")
+    if num_turns is not None:
+        print(f"[System] claude 턴 수: {num_turns} ({'도구 사용' if num_turns > 1 else '도구 미사용'})")
 
     return strip_markdown(payload.get("result") or "")
 
