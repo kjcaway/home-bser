@@ -28,7 +28,7 @@ from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
 from agent.vad import load_vad
 from agent.tts import TextToSpeech
-from agent.skills import timer, hermes_api
+from agent.skills import timer, claude_p, hermes_api
 
 
 # ==========================================
@@ -38,11 +38,16 @@ from agent.skills import timer, hermes_api
 # 자신이 처리할 명령이면 수행 후 True, 아니면 False 를 반환한다.
 # 새 기능 추가 = handle 함수를 작성해 이 리스트에 등록하면 끝. (아래 루프는 그대로)
 #
-# 순서가 중요하다: hermes_api 는 문장을 가리지 않고 받는 catch-all 스킬이므로
-# 반드시 마지막에 둔다. (.env 에 hermes 설정이 없으면 스스로 False 를 반환해
-# 아래 에코 폴백으로 넘어간다)
+# 순서가 중요하다: claude_p 와 hermes_api 는 문장을 가리지 않고 받는 catch-all
+# 스킬이므로 timer 같은 구체 스킬 뒤에 둔다. 둘 다 .env 스위치로 켜고 끄며,
+# 꺼져 있으면 스스로 False 를 반환해 다음 스킬(최종적으로 아래 에코 폴백)로 넘어간다.
+#
+# claude_p 를 hermes_api 보다 앞에 두는 이유: claude CLI 는 웹 검색까지 쓸 수 있어
+# 답할 수 있는 범위가 넓다. 로컬 LLM(hermes)은 claude 를 끄거나 못 쓸 때의 폴백으로
+# 뒤에 남긴다. (claude_p 는 CLAUDE_CLI_ENABLED 미설정 시 꺼짐 = 기존 동작 그대로)
 SKILLS = [
     timer.handle,
+    claude_p.handle,
     hermes_api.handle,
 ]
 

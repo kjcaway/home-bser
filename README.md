@@ -30,7 +30,7 @@ flowchart TD
 
 ## 명령 처리 = 스킬 디스패처
 
-`execute_command()` 는 `SKILLS` 레지스트리를 **순서대로** 순회하며, 각 스킬의 `handle(user_text, tts) -> bool` 을 호출합니다. `True`(= 내가 처리함)를 반환하는 첫 스킬에서 멈춥니다. **순서가 중요**합니다 — `hermes_api` 는 문장을 가리지 않는 catch-all 이므로 반드시 마지막에 둡니다.
+`execute_command()` 는 `SKILLS` 레지스트리를 **순서대로** 순회하며, 각 스킬의 `handle(user_text, tts) -> bool` 을 호출합니다. `True`(= 내가 처리함)를 반환하는 첫 스킬에서 멈춥니다. **순서가 중요**합니다 — `claude_p` 와 `hermes_api` 는 문장을 가리지 않는 catch-all(LLM) 스킬이므로 구체적인 스킬들 **뒤에** 둡니다.
 
 ```mermaid
 flowchart TD
@@ -38,16 +38,23 @@ flowchart TD
 
     TIMER{"timer.handle<br/>타이머/스톱워치 의도?"}
     TIMER -->|True: 처리함| TIMER_DO["timer.py 서브프로세스 실행<br/>(N초 후 알람 재생)"] --> DONE([턴 종료])
-    TIMER -->|False| HERMES
+    TIMER -->|False| CLAUDE
 
-    HERMES{"hermes_api.handle<br/>(.env 의 HERMES_API_KEY 로 on/off)"}
+    CLAUDE{"claude_p.handle<br/>(.env 의 CLAUDE_CLI_ENABLED 로 on/off)"}
+    CLAUDE -->|enabled → LLM 응답| CLAUDE_DO["claude --print 질의<br/>웹 검색 허용 → TTS 로 답변"] --> DONE
+    CLAUDE -->|disabled / claude 명령 없음 → False| HERMES
+
+    HERMES{"hermes_api.handle<br/>(.env 의 HERMES_ENABLED 로 on/off)"}
     HERMES -->|enabled → LLM 응답| HERMES_DO["hermes gateway 질의<br/>qwen3:8b → TTS 로 답변"] --> DONE
     HERMES -->|disabled → False| ECHO
 
     ECHO["폴백: 인식 결과 그대로 안내<br/>tts.speak('인지된 음성은 …')"] --> DONE
 ```
 
-> 새 기능 추가 = `handle(user_text, tts)` 함수를 작성해 `SKILLS` 리스트에 등록하면 끝입니다. (루프 코드는 그대로) 단, catch-all 인 `hermes_api.handle` 앞에 등록하세요.
+- `claude_p` 를 앞에 두는 이유: Claude Code CLI 는 웹 검색(WebSearch/WebFetch)을 쓸 수 있어 답변 범위가 넓습니다. 로컬 LLM(`hermes`)은 claude 를 껐거나 CLI 가 없을 때의 폴백으로 뒤에 남깁니다.
+- 둘 다 `.env` 스위치로 꺼져 있으면 `False` 를 반환하므로 **claude → hermes → 에코 폴백** 순으로 degrade 합니다. `CLAUDE_CLI_ENABLED` 는 미설정 시 **꺼짐**이라 기존 동작에 영향이 없습니다.
+
+> 새 기능 추가 = `handle(user_text, tts)` 함수를 작성해 `SKILLS` 리스트에 등록하면 끝입니다. (루프 코드는 그대로) 단, catch-all 인 `claude_p.handle` / `hermes_api.handle` **앞에** 등록하세요.
 
 ## 모듈 구성
 
@@ -60,7 +67,8 @@ flowchart TD
 | STT (음성→텍스트) | `agent/stt.py` | `load_stt_model()`, `transcribe_pcm()` |
 | TTS (텍스트→음성) | `agent/tts.py` | `TextToSpeech.speak()` |
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
-| 스킬: LLM (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
+| 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
+| 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
 
 > 모델(Wake Word / STT / TTS)은 import 시점이 아니라 `main()` 안에서 **한 번만** 로드됩니다. 덕분에 다른 스크립트가 `agent` 하위 모듈을 개별 import 해도 전체 파이프라인이 딸려오지 않습니다.
 
@@ -111,6 +119,19 @@ python main_agent.py --debug-record     # 매 턴 녹음 원본을 debug_record.
 - STT/TTS 는 모든 환경에서 CPU 로 동작합니다. GPU(cuda) 는 추후 로컬 LLM 스테이지 전용으로 남겨둡니다.
 - 프로그램 로드 시 선택된 환경이 로그로 출력됩니다. (예: `[System] 실행 환경: ...`)
 - STT(Faster-Whisper) compute_type 은 디바이스에 따라 자동 설정됩니다. (cuda: float16, cpu: int8) — 현재는 두 프리셋 모두 cpu 이므로 항상 int8.
+
+### LLM 백엔드 설정 (`.env`)
+질문에 답하는 catch-all 스킬은 두 가지이고, 모두 프로젝트 루트의 **git-ignored `.env`** 로 켭니다. `cp .env.example .env` 후 값을 채우세요. 둘 다 꺼져 있으면(= `.env` 없음) 인식 결과를 그대로 읽어주는 에코 폴백이 동작하므로, 개발환경은 설정 없이 그대로 돌아갑니다.
+
+| 백엔드 | 스위치 | 특징 |
+| --- | --- | --- |
+| Claude Code CLI (`agent/skills/claude_p.py`) | `CLAUDE_CLI_ENABLED=1` | 로컬 `claude --print` 실행. 웹 검색 허용(`WebSearch,WebFetch`)이라 최신 정보도 답변. **클라우드 호출이라 오프라인 아님** |
+| hermes gateway (`agent/skills/hermes_api.py`) | `HERMES_ENABLED=1` | 로컬 `qwen3:8b`. 네트워크 경계 기준 오프라인 유지 |
+
+- 둘 다 켜면 `claude_p` 가 먼저 시도되고, 꺼져 있거나 `claude` 명령이 없으면 hermes 로 넘어갑니다.
+- `CLAUDE_CLI_ENABLED` 는 **미설정 시 꺼짐**입니다 (claude CLI 는 API 키가 필요 없어, 설치만으로 켜지면 모든 발화가 조용히 클라우드로 나가기 때문).
+- 그 외 키: `CLAUDE_CLI_MODEL`(opus/sonnet/haiku, 비우면 CLI 기본값), `CLAUDE_CLI_TIMEOUT`(기본 60초), `CLAUDE_CLI_ALLOWED_TOOLS`(기본 `WebSearch,WebFetch`, 비우면 도구 없이 응답).
+- 연결 확인은 `python test-claude-cli.py "질문"` / `python test_hermes_api.py "질문"` 으로 각각 할 수 있습니다.
 
 ### 장치 선택 (인덱스가 아니라 이름으로)
 PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마이크/스피커의 인덱스는 **재부팅·재연결 때마다 바뀝니다** (하드코딩한 `2` 는 깨짐). 그래서 `prod` 프리셋은 인덱스 대신 이름 패턴(`input_device_name` / `output_device_name`)을 들고 있고, 시작 시 `resolve_devices()` 가 이를 실제 인덱스로 해석합니다.

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A 100% offline, local Korean voice assistant ("home agent") intended to run on Ubuntu with an NVIDIA GPU. The full pipeline — wake word → speech-to-text → intent handling → text-to-speech — runs on local CPU/GPU with no cloud APIs. `main_agent.py` is the entry point (a thin orchestrator); the implementation lives in the `agent/` package.
+An offline-first, local Korean voice assistant ("home agent") intended to run on Ubuntu with an NVIDIA GPU. The pipeline — wake word → speech-to-text → intent handling → text-to-speech — runs entirely on local CPU/GPU. The one stage that can leave the machine is the optional LLM answer step: hermes keeps it local (127.0.0.1), while the Claude Code CLI skill calls the cloud and is off by default (see "Environment assumptions"). `main_agent.py` is the entry point (a thin orchestrator); the implementation lives in the `agent/` package.
 
 Note: the repo root **is itself the Python venv** (`bin/`, `include/`, `lib/`, `pyvenv.cfg` are venv artifacts, git-ignored). Source lives directly at the root alongside them.
 
@@ -73,14 +73,15 @@ The code is split into an `agent/` package with one module per pipeline stage; `
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
 - `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False)` (`stop_event` set 시 청크 경계에서 즉시 중단, `loop`=반복 재생), `save_pcm_wav(path, pcm_bytes, rate, channels)` (16-bit PCM → wav, `--debug-record` 진단용), `_convert_pcm16()` / `_downmix_to_mono()` (다채널→모노 다운믹스 공용), `_supports_format(audio, device_index, channels, rate, fmt, kind)` (입/출력 공용, 오픈 전 레이트 지원 조회로 ALSA 경고 회피), `list_input_devices()` / `list_output_devices()` 는 공용 `_list_devices(audio, kind)` 위임.
-- `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes 스킬에서 사용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
+- `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes / claude CLI 스킬에서 사용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper, model size from `STT_MODEL_SIZE` in `config.py`, currently `medium`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
-  - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask()`, `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage" 참고).
+  - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `build_command()`, `ask()`, `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
+  - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask()`, `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (hermes gateway)" 참고).
 
 Models are loaded once inside `main()` (not at import time), so other scripts can import individual `agent` modules without pulling in the whole pipeline. Skills load no models themselves — `handle(user_text, tts)` receives the `TextToSpeech` instance from the caller.
 
@@ -145,9 +146,15 @@ Note: ctranslate2 (faster-whisper's backend) has **no Metal/GPU support on Apple
 
 ### Intent handling (current behavior)
 
-`main_agent.py` holds a `SKILLS` registry — a list of `handle(user_text, tts) -> bool` functions. `execute_command()` walks the list in order and stops at the first skill that returns `True` (meaning "I handled this"). Adding a feature = write a `handle` function and register it. **Order matters**: `hermes_api.handle` is a catch-all and must stay last. If no skill handles the utterance, the fallback echoes the recognized text via TTS.
+`main_agent.py` holds a `SKILLS` registry — a list of `handle(user_text, tts) -> bool` functions. `execute_command()` walks the list in order and stops at the first skill that returns `True` (meaning "I handled this"). Adding a feature = write a `handle` function and register it. If no skill handles the utterance, the fallback echoes the recognized text via TTS.
 
-The original design (documented in `GEMINI.md`) routed transcribed text to a local **Ollama** LLM (`qwen3:14b`). That was replaced by the hermes gateway skill below.
+**Order matters.** The registry is currently `timer.handle → claude_p.handle → hermes_api.handle`. There are **two** catch-all (LLM) skills, and both must stay behind the specific skills like `timer`:
+
+- `claude_p` runs first because Claude Code CLI can use web search, so it answers a wider range of questions than the local model.
+- `hermes_api` stays last as the fallback for when `claude_p` is off or its CLI is missing.
+- Both are gated by their own `.env` switch and return `False` when off, so the chain degrades: claude → hermes → echo fallback. A new specific skill goes **before** both.
+
+The original design (documented in `GEMINI.md`) routed transcribed text to a local **Ollama** LLM (`qwen3:14b`). That was replaced by the two LLM skills below.
 
 **timer skill** (`agent/skills/timer.py`):
 
@@ -165,6 +172,26 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 
 **Waiting sound (응답 지연 안내):** the hermes call is a blocking HTTP request that can take several seconds. To signal "still working, not stuck", `handle()` wraps `ask()` with a `BackgroundSound` (`agent/backgroundsound.py`) that loops `WAITING_SOUND_FILE` (`soundfile/waiting.wav`) on a background thread. Two behaviors matter: (1) it only starts after a `WAITING_SOUND_DELAY_SECONDS` (0.8 s) threshold, so replies faster than that get **no** sound and are not interrupted; (2) `stop()` is called **before** `tts.speak()` on every path (success, empty, exception) and joins the playback thread, so the waiting loop's output stream is fully closed before TTS opens the same device — no two-streams-on-one-device conflict. Because the mic is already stopped during command processing (`main_agent.py`), the waiting sound is never recorded and can't re-trigger the wake word. If `waiting.wav` is missing or playback fails, the thread swallows the error and the LLM turn proceeds normally.
 
+### LLM stage (Claude Code CLI)
+
+`agent/skills/claude_p.py` answers an unclaimed utterance by shelling out to the locally installed **Claude Code CLI** in non-interactive mode and speaking the reply. The command it builds (`build_command()`):
+
+```
+claude --print --output-format json [--model …] --append-system-prompt "…" --allowedTools "WebSearch,WebFetch"
+```
+
+- **Question via stdin, not argv** — `subprocess.run(cmd, input=question)`. Same reason as `test-claude-cli.py`: a sentence starting with `-` would be read as a CLI option, and a long prompt can hit argv length limits.
+- **`--output-format json`** so `is_error` / `result` can be read explicitly. If the JSON can't be parsed (format change), the raw stdout is spoken instead of failing the turn.
+- **`--allowedTools "WebSearch,WebFetch"`** (overridable via `CLAUDE_CLI_ALLOWED_TOOLS`; an empty value = model knowledge only, no tools). This is the point of the skill — hermes' local `qwen3:8b` can't answer anything current.
+- **`--append-system-prompt`** carries the same "one or two short plain-text Korean sentences" instruction as hermes, since the answer is read aloud. `strip_markdown()` then defensively removes links, list markers, code fences, and emphasis characters that web-search answers tend to include anyway.
+- **`cwd` is a temp dir** (`WORK_DIR = tempfile.gettempdir()`), not the project root. Running `claude` inside this repo would load this very `CLAUDE.md` as project context, contaminating answers to ordinary questions ("서울 수도 어디야") with repo instructions.
+- **Failure paths all return `True`** (never fall through to the echo, which would be confusing for a question): a timeout speaks `TIMEOUT_MESSAGE`, any other failure or an empty answer speaks `ERROR_MESSAGE`. The one exception is a **missing `claude` binary** (`shutil.which`), which returns `False` so the turn degrades to hermes/echo; the warning prints once (`_warned_missing`) instead of every turn.
+- **Waiting sound** — identical contract to the hermes section above (delay threshold, `stop()` before `tts.speak()` on every path). It matters more here: a web-search turn can run well past hermes' latency.
+
+Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_TIMEOUT` (default 60 s), `CLAUDE_CLI_ALLOWED_TOOLS`.
+
+`CLAUDE_CLI_ENABLED` is **explicit opt-in — unset means off**, unlike `HERMES_ENABLED`'s backward-compatible key-presence fallback. The claude CLI needs no API key, so "installed ⇒ enabled" would silently route every dev utterance to the cloud. Only `1`/`true`/`yes`/`on` turns it on; anything else (including an unrecognized value, which warns) is off.
+
 ### TTS single source
 
 `agent/tts.py` (`TextToSpeech`) is the only TTS implementation; `timer.py` and `text_to_wav.py` import it.
@@ -173,7 +200,8 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 
 - **`main_agent.py` environment is selectable** via `--environment dev|prod` (default `dev`); the preset drives the compute device (STT/TTS) and the audio devices (`dev`=cpu/mic index 0, `prod`=cpu/USB devices matched by name — see "Device selection" above). Both presets run STT/TTS on cpu; the GPU belongs to hermes (the LLM), which runs as a separate server process rather than in-process. `timer.py` auto-detects (`cuda` if available, else `cpu`).
 - **The agent is no longer 100% offline when hermes is enabled** — but hermes runs locally (127.0.0.1), so no cloud APIs are involved and the offline property holds at the network boundary.
-- The LLM stage is gated by `HERMES_ENABLED` in `.env` (falling back to `HERMES_API_KEY` presence when unset), not by `--environment`. In practice that means prod-only, since dev has no `.env`.
+- **`CLAUDE_CLI_ENABLED=1` does break the offline property**, unlike hermes: `agent/skills/claude_p.py` shells out to Claude Code CLI, which calls the Anthropic API (and, with `--allowedTools "WebSearch,WebFetch"`, the open web). That is the point of the skill — answering questions a local model can't — but it means utterances leave the machine. Off by default.
+- Both LLM stages are gated by `.env` (`CLAUDE_CLI_ENABLED`; `HERMES_ENABLED`, falling back to `HERMES_API_KEY` presence when unset), not by `--environment`. In practice that means prod-only, since dev has no `.env`.
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
 - Code comments, prompts, and print output are in Korean.
@@ -182,5 +210,6 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 
 - `README.md` — venv + pip setup.
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
-- `.env.example` — template for the git-ignored `.env` (hermes settings, audio device name patterns).
+- `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
+- `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model).
