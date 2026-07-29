@@ -65,7 +65,7 @@ flowchart TD
 | 오디오 I/O | `agent/audio_io.py` | `open_input_stream()`, `record_frames()`, `play_wav_file()`, `resolve_devices()` |
 | 호출어 감지 | `agent/wakeword.py` | `load_wakeword_model()`, `get_score()` |
 | STT (음성→텍스트) | `agent/stt.py` | `load_stt_model()`, `transcribe_pcm()` |
-| TTS (텍스트→음성) | `agent/tts.py` | `TextToSpeech.speak()` |
+| TTS (텍스트→음성) | `agent/tts.py` | `TextToSpeech.speak()`, `SilentTextToSpeech` (무음 테스트용) |
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
 | 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
 | 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
@@ -112,6 +112,7 @@ python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
 python main_agent.py --environment prod # 운영환경: cpu STT/TTS, USB 장치를 이름으로 탐색
 python main_agent.py --list-devices     # 입출력 장치 이름/인덱스 확인
 python main_agent.py --debug-record     # 매 턴 녹음 원본을 debug_record.wav 로 저장 (진단용)
+python main_agent.py --off-speaker "오늘 날씨는 어때?"   # 마이크/스피커 없이 문장 하나만 처리 (테스트용)
 ```
 - `--environment` 프리셋은 STT/TTS 실행 디바이스와 마이크·스피커 장치를 함께 결정합니다.
   - `dev` — `device=cpu`, 마이크 인덱스 `0`, 기본 스피커
@@ -119,6 +120,26 @@ python main_agent.py --debug-record     # 매 턴 녹음 원본을 debug_record.
 - STT/TTS 는 모든 환경에서 CPU 로 동작합니다. GPU(cuda) 는 추후 로컬 LLM 스테이지 전용으로 남겨둡니다.
 - 프로그램 로드 시 선택된 환경이 로그로 출력됩니다. (예: `[System] 실행 환경: ...`)
 - STT(Faster-Whisper) compute_type 은 디바이스에 따라 자동 설정됩니다. (cuda: float16, cpu: int8) — 현재는 두 프리셋 모두 cpu 이므로 항상 int8.
+
+### 무음 테스트 (`--off-speaker`)
+마이크에 대고 말하지 않고 **문장 하나만** 파이프라인에 넣어 스킬 라우팅과 LLM 응답을 확인합니다.
+
+```bash
+python main_agent.py --off-speaker "대한민국의 수도는 어디야?"
+```
+```
+[System] 무음 테스트 모드(--off-speaker): 마이크/스피커를 쓰지 않고 호출어·STT·TTS 를 건너뜁니다.
+[사용자 입력]: "대한민국의 수도는 어디야?"
+-> claude CLI 에 질문합니다: 대한민국의 수도는 어디야?
+[응답] 대한민국의 수도는 서울입니다. (4.89초)
+🔇 [무음 응답] 대한민국의 수도는 서울입니다.
+[System] 처리 소요: 4.9초
+```
+
+- 호출어 감지·녹음·STT·TTS 재생을 모두 건너뛰고, 답변은 `🔇 [무음 응답]` 으로 출력만 합니다.
+- 오디오 장치를 열지 않고 whisper·VITS 모델도 로드하지 않으므로 **즉시 실행**되고, 마이크/스피커가 없는 머신(CI·SSH 세션)에서도 동작합니다.
+- 소리를 내는 경로는 모두 함께 막힙니다: 타이머 스킬은 알람 서브프로세스(`timer.py`)를 띄우지 않고 무엇을 실행했을지만 로그로 남기고, LLM 스킬의 대기음도 재생되지 않습니다.
+- 처리 후 바로 종료합니다(대기 루프로 돌아가지 않음).
 
 ### LLM 백엔드 설정 (`.env`)
 질문에 답하는 catch-all 스킬은 두 가지이고, 모두 프로젝트 루트의 **git-ignored `.env`** 로 켭니다. `cp .env.example .env` 후 값을 채우세요. 둘 다 꺼져 있으면(= `.env` 없음) 인식 결과를 그대로 읽어주는 에코 폴백이 동작하므로, 개발환경은 설정 없이 그대로 돌아갑니다.

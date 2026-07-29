@@ -24,7 +24,17 @@ python main_agent.py --environment dev  # 개발환경: cpu, mic index 0
 python main_agent.py --environment prod # 운영환경: cpu STT/TTS, USB 장치를 이름으로 탐색
 python main_agent.py --list-devices     # 입출력 장치 이름/인덱스 확인
 python main_agent.py --debug-record     # 매 턴 녹음 원본을 debug_record.wav 로 저장 (진단용)
+python main_agent.py --off-speaker "오늘 날씨는 어때?"   # 마이크/스피커 없이 문장 하나만 처리 (테스트용)
 ```
+
+`--off-speaker "<문장>"` runs **one turn from text** and exits: it skips the wake word, the mic, STT, and TTS playback, feeding the sentence straight to `execute_command()` and printing the reply. Handled in `main()` before device resolution, so no PyAudio device is opened and neither whisper nor VITS is loaded — it starts instantly and works on a machine with no audio hardware (CI, SSH). Use it to test skill routing and LLM answers without talking to the mic. An empty string is rejected with a usage hint.
+
+`SilentTextToSpeech` (`agent/tts.py`) is the stand-in passed to the skills: same `speak()` / `output_device_index` interface, but it prints `🔇 [무음 응답] …` instead of synthesizing. It also carries a `silent = True` marker, because two paths make sound **without going through `tts.speak()`** and must be suppressed explicitly:
+
+- `timer` skill — the alarm plays in a `timer.py` subprocess, so `run_timer_script(…, silent=True)` logs what it would have run and skips the spawn.
+- `claude_p` / `hermes_api` skills — the waiting sound plays via `BackgroundSound`, so they pass `enabled=not tts.silent`; `BackgroundSound.start()` then becomes a no-op while the `start()`/`stop()` pairing in the skill stays unchanged.
+
+Both use `getattr(tts, "silent", False)`, so any other TTS object keeps working.
 
 `--debug-record` (a plain `argparse` store-true flag, off by default; carried on `RunConfig.debug_record`) saves each turn's raw recording to `debug_record.wav` in the working directory — a diagnostic switch for when STT is slow or mis-transcribes (see "Diagnostics" below). Unlike `--list-devices` it does **not** exit; it runs the normal pipeline with the extra dump.
 
@@ -71,13 +81,13 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 
 The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
 
-- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
+- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` / `--list-devices` / `--debug-record` / `--off-speaker` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
 - `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False)` (`stop_event` set 시 청크 경계에서 즉시 중단, `loop`=반복 재생), `save_pcm_wav(path, pcm_bytes, rate, channels)` (16-bit PCM → wav, `--debug-record` 진단용), `_convert_pcm16()` / `_downmix_to_mono()` (다채널→모노 다운믹스 공용), `_supports_format(audio, device_index, channels, rate, fmt, kind)` (입/출력 공용, 오픈 전 레이트 지원 조회로 ALSA 경고 회피), `list_input_devices()` / `list_output_devices()` 는 공용 `_list_devices(audio, kind)` 위임.
-- `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes / claude CLI 스킬에서 사용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
+- `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes / claude CLI 스킬에서 사용). `enabled=False` 면 `start()` 가 no-op (무음 모드용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper, model size from `STT_MODEL_SIZE` in `config.py`, currently `medium`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
-- `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play).
+- `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play). Also `SilentTextToSpeech` — 모델 로드 없이 답변을 출력만 하는 `--off-speaker` 전용 대역 (`silent = True` 표식).
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
   - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `build_command()`, `ask()`, `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
@@ -204,6 +214,7 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_TIM
 - Both LLM stages are gated by `.env` (`CLAUDE_CLI_ENABLED`; `HERMES_ENABLED`, falling back to `HERMES_API_KEY` presence when unset), not by `--environment`. In practice that means prod-only, since dev has no `.env`.
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
+- A mic and a speaker are required for the normal loop, but **not** for `--off-speaker`, which opens no audio device at all.
 - Code comments, prompts, and print output are in Korean.
 
 ## Docs

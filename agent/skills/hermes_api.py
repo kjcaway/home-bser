@@ -157,6 +157,9 @@ def handle(user_text: str, tts) -> bool:
         output_device_index=tts.output_device_index,
         delay_seconds=WAITING_SOUND_DELAY_SECONDS,
         interval_seconds=WAITING_SOUND_INTERVAL_SECONDS,
+        # 대기음은 tts 를 거치지 않고 직접 재생되므로, 무음 모드(--off-speaker)에서는
+        # 여기서 꺼야 한다.
+        enabled=not getattr(tts, "silent", False),
     )
     waiting.start()
 

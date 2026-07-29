@@ -104,8 +104,14 @@ def format_time_korean(time_arg: str) -> str:
 # ==========================================
 # 타이머 스크립트 실행 함수
 # ==========================================
-def run_timer_script(time_arg, output_device_index=None):
+def run_timer_script(time_arg, output_device_index=None, silent=False):
     print(f"타이머 스크립트를 호출합니다. 설정 시간: {time_arg}")
+
+    # 무음 모드(--off-speaker)에서는 알람이 별도 프로세스로 재생되어 tts 를 우회하므로
+    # 여기서 막아야 한다. 무엇이 실행됐을지는 로그로 남겨 테스트에 지장이 없게 한다.
+    if silent:
+        print(f"[무음 모드] timer.py {time_arg} 실행을 건너뜁니다. (알람 재생 안 함)")
+        return
 
     try:
         # sys.executable은 현재 실행 중인 파이썬 인터프리터 경로를 자동으로 가져옵니다. (예: python, python3)
@@ -154,5 +160,6 @@ def handle(user_text: str, tts) -> bool:
     # 알람음이 메인 에이전트와 같은 스피커로 나가도록 출력 장치 인덱스를 전달한다.
     output_device_index = getattr(tts, "output_device_index", None)
     tts.speak(f"{format_time_korean(time_argument)} 뒤에 알람을 실행합니다.")
-    run_timer_script(time_argument, output_device_index)
+    run_timer_script(time_argument, output_device_index,
+                     silent=getattr(tts, "silent", False))
     return True

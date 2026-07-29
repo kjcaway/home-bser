@@ -134,6 +134,7 @@ class RunConfig(NamedTuple):
     output_device_index: int | None
     list_devices: bool
     debug_record: bool
+    off_speaker: str | None
 
 
 def parse_device_args():
@@ -143,6 +144,8 @@ def parse_device_args():
       prod = 운영환경 (device=cpu, USB 마이크/스피커를 이름으로 탐색)
       dev  = 개발환경 (device=cpu, mic=0)
     --list-devices 를 주면 입출력 장치 목록만 출력하고 종료하도록 신호합니다.
+    --off-speaker "문장" 을 주면 마이크/스피커 없이 그 문장 한 개만 처리하고 종료합니다
+    (스킬 동작 테스트용. 호출어·STT·TTS 를 모두 건너뛴다).
     STT(Faster-Whisper) compute_type: GPU는 float16, CPU는 int8 이 적합합니다.
 
     장치 이름 패턴은 .env 의 AUDIO_INPUT_NAME / AUDIO_OUTPUT_NAME 으로 덮어쓸 수
@@ -165,6 +168,13 @@ def parse_device_args():
         action="store_true",
         help="매 턴 녹음 원본을 debug_record.wav 로 저장 (오디오 품질 진단용)",
     )
+    parser.add_argument(
+        "--off-speaker",
+        metavar="질문",
+        default=None,
+        help="마이크/스피커 없이 주어진 문장을 곧바로 처리하고 결과를 텍스트로 출력 후 종료 "
+             "(예: --off-speaker \"오늘 날씨는 어때?\")",
+    )
     args = parser.parse_args()
 
     load_env_file()
@@ -181,11 +191,16 @@ def parse_device_args():
             return f"인덱스 {index}"
         return "시스템 기본"
 
-    print(f"[System] 실행 환경: {args.environment} "
-          f"(device: {device}, "
-          f"마이크: {describe(input_device_name, preset['input_device_index'])}, "
-          f"스피커: {describe(output_device_name, preset['output_device_index'])}, "
-          f"STT compute_type: {stt_compute_type})")
+    if args.off_speaker is not None:
+        # 무음 모드에서는 오디오 장치를 아예 열지 않으므로 마이크/스피커 정보를 찍지 않는다.
+        print("[System] 무음 테스트 모드(--off-speaker): "
+              "마이크/스피커를 쓰지 않고 호출어·STT·TTS 를 건너뜁니다.")
+    else:
+        print(f"[System] 실행 환경: {args.environment} "
+              f"(device: {device}, "
+              f"마이크: {describe(input_device_name, preset['input_device_index'])}, "
+              f"스피커: {describe(output_device_name, preset['output_device_index'])}, "
+              f"STT compute_type: {stt_compute_type})")
 
     return RunConfig(
         device=device,
@@ -196,4 +211,5 @@ def parse_device_args():
         output_device_index=preset["output_device_index"],
         list_devices=args.list_devices,
         debug_record=args.debug_record,
+        off_speaker=args.off_speaker,
     )

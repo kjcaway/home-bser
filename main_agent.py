@@ -27,7 +27,7 @@ import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
 from agent.stt import load_stt_model, transcribe_pcm
 from agent.vad import load_vad
-from agent.tts import TextToSpeech
+from agent.tts import TextToSpeech, SilentTextToSpeech
 from agent.skills import timer, claude_p, hermes_api
 
 
@@ -69,6 +69,20 @@ def execute_command(user_text, tts):
     # 처리 가능한 스킬이 없을 때의 폴백
     print("-> 처리 가능한 스킬이 없습니다.")
     tts.speak(f"인지된 음성은 {user_text} 입니다")
+
+
+def run_text_turn(user_text):
+    """--off-speaker: 마이크/스피커 없이 주어진 문장 한 개만 처리한다 (스킬 테스트용).
+
+    호출어 감지·녹음·STT 를 건너뛰고 텍스트를 곧바로 스킬 디스패처에 넣으며, 답변은
+    음성 대신 표준출력으로 출력한다(SilentTextToSpeech). 무거운 모델(whisper/VITS)을
+    로드하지 않으므로 즉시 실행되고, 오디오 장치가 없어도 동작한다.
+    """
+    print(f"\n[무음 테스트] 입력 문장을 그대로 처리합니다: \"{user_text}\"")
+
+    t_start = time.monotonic()
+    execute_command(user_text, SilentTextToSpeech())
+    print(f"\n[System] 처리 소요: {time.monotonic() - t_start:.1f}초")
 
 
 def run_turn(stream, vad, whisper_model, tts, oww_model, output_device_index, debug_record):
@@ -144,6 +158,16 @@ def main():
         list_input_devices(audio)
         list_output_devices(audio)
         audio.terminate()
+        return
+
+    # --off-speaker "문장": 오디오 장치·모델을 건드리지 않고 그 문장만 처리하고 종료.
+    # 스킬(타이머 판정, LLM 응답)만 빠르게 확인할 때 쓴다.
+    if cfg.off_speaker is not None:
+        if not cfg.off_speaker.strip():
+            print("[오류] --off-speaker 에 처리할 문장을 넣어주세요. "
+                  "(예: --off-speaker \"오늘 날씨는 어때?\")")
+            return
+        run_text_turn(cfg.off_speaker.strip())
         return
 
     # 장치 이름 → 인덱스 해석. USB 장치의 PyAudio 인덱스는 연결/부팅마다 바뀌므로

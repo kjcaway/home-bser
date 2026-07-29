@@ -20,15 +20,23 @@ class BackgroundSound:
     """
 
     def __init__(self, file_path, output_device_index=None, delay_seconds=0.8,
-                 interval_seconds=5.0):
+                 interval_seconds=5.0, enabled=True):
         self.file_path = file_path
         self.output_device_index = output_device_index
         self.delay_seconds = delay_seconds
         self.interval_seconds = interval_seconds
+        self.enabled = enabled
         self._stop = threading.Event()
         self._thread = None
 
     def start(self):
+        """재생 스레드를 띄운다. enabled=False 면 아무 것도 하지 않는다.
+
+        무음 모드(--off-speaker)처럼 스피커를 아예 쓰지 않는 실행에서 호출부의
+        start()/stop() 짝을 그대로 두고 재생만 끄기 위한 스위치다.
+        """
+        if not self.enabled:
+            return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
