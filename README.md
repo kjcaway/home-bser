@@ -82,6 +82,7 @@ flowchart TD
 | 배치: 설정 | `batch/config.py` | `load_batch_env()`, `read_topics()`, `output_dir()` |
 | 배치: claude 질의 | `batch/claude_query.py` | `ask()`, `build_command()`, `fix_bullets()` |
 | 배치: 정기 LLM 요약 | `batch/daily_briefing.py` | `main()`, `summarize_topic()`, `render_document()` |
+| 배치: Discord 알림 (공용) | `batch/discord_notify.py` | `notify()`, `send()`, `truncate()`, `is_enabled()` |
 
 > 모델(Wake Word / STT / TTS)은 import 시점이 아니라 `main()` 안에서 **한 번만** 로드됩니다. 덕분에 다른 스크립트가 `agent` 하위 모듈을 개별 import 해도 전체 파이프라인이 딸려오지 않습니다.
 
@@ -96,16 +97,17 @@ python3 -m venv .
 ```
 
 ## Python package
+의존성 목록의 **정본은 [`requirements.txt`](requirements.txt)** 입니다. 이 문서에 같은 목록을 다시 적지 않습니다 — 예전에 양쪽에 두었다가 서로 어긋난 적이 있어(`openai` 누락, `silero-vad` 누락) 한 곳으로 모았습니다. 패키지를 추가할 때는 `requirements.txt` 만 고치세요.
+
 ```bash
 # it must be executed in venv
-pip3 install pyaudio numpy openwakeword faster-whisper
+pip3 install -r requirements.txt
+
+# GPU(Ubuntu + NVIDIA) 환경에서만 추가로 설치 (CPU/macOS 에서는 설치하지 말 것)
 pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
-pip3 install requests
-pip3 install torch transformers scipy
-pip3 install uroman
-pip3 install silero-vad   # 발화 종료 감지(VAD endpointing). 모델을 번들해 오프라인 로드
-pip3 install cmudict      # 영문 → 한글 음차용 발음 사전. 데이터를 번들해 오프라인 로드
 ```
+
+구성은 오디오 I/O(`pyaudio`·`numpy`·`scipy`) · 호출어(`openwakeword`) · STT(`faster-whisper`) · VAD(`silero-vad`) · TTS(`torch`·`transformers`·`uroman`·`cmudict`) · LLM/배치(`openai`·`requests`) 입니다. `silero-vad` 와 `cmudict` 는 모델·데이터를 휠에 번들해 **런타임 다운로드가 없어** 오프라인 성질이 유지됩니다.
 
 > **cuDNN 버전 핀 주의**
 > `nvidia-cudnn-cu12` 는 반드시 **torch 가 빌드된 cuDNN 버전과 일치**해야 합니다.
@@ -284,10 +286,26 @@ cp batch/.env.example batch/.env      # 최초 1회: 주제·모델 설정 (루�
 - `claude 턴 수` 는 검색을 실제로 썼는지 보는 가장 싼 지표입니다 — `1` 이면 모델이 기억으로만 답한 것이니, 최신 정보를 기대했다면 `CLAUDE_CLI_ALLOWED_TOOLS` 를 확인하세요.
 - 소요 시간은 주제 수와 `CLAUDE_CLI_EFFORT` 에 비례합니다 (위는 주제 1개 · `effort=low` 측정치).
 
-- 결과는 `batch/output/YYYY-MM-DD.md`. 같은 날 다시 돌리면 덮어씁니다.
-- `--topic "주제"`(반복 가능)로 주제 하나만, `--stdout` 으로 파일 없이 출력만, `--output 경로`로 저장 위치를 지정할 수 있습니다.
+- 결과는 `batch/output/YYYY-MM-DD.md`. 같은 날 다시 돌리면 덮어씁니다. 저장 직후, 웹훅을 설정해 두었다면 그 파일을 읽어 **Discord 로 보냅니다**(아래 참고).
+- `--topic "주제"`(반복 가능)로 주제 하나만, `--stdout` 으로 파일 없이 출력만, `--output 경로`로 저장 위치를, `--no-notify` 로 저장만 하고 전송을 건너뛸 수 있습니다(같은 날 재실행 시 채널에 중복으로 올리지 않으려는 용도).
 - **`python batch/daily_briefing.py` 로는 실행하지 않습니다.** 그렇게 부르면 `sys.path[0]` 이 `batch/` 가 되어 `import agent` 가 깨집니다. `-m` 을 쓰세요(`python -m agent.text_norm` 과 같은 방식).
-- 주제 하나가 실패해도 잡 전체를 멈추지 않습니다. 실패 사유를 그 자리에 적고 나머지를 계속 요약한 뒤, 종료 코드로 알립니다: `0` 전부 성공, `1` 설정 문제로 아무것도 안 함, `2` 문서는 만들었지만 실패한 주제 있음.
+- 주제 하나가 실패해도 잡 전체를 멈추지 않습니다. 실패 사유를 그 자리에 적고 나머지를 계속 요약한 뒤, 종료 코드로 알립니다: `0` 전부 성공, `1` 설정 문제로 아무것도 안 함, `2` 문서는 만들었지만 실패한 주제가 있거나 Discord 전송에 실패함. 웹훅을 아예 설정하지 않은 것은 실패가 아닙니다(`0`).
+
+### Discord 알림 (공용 모듈)
+배치 결과를 Discord 채널에 **메시지 본문으로**(첨부파일 아님) 보냅니다. `daily_briefing` 은 파일 저장 직후 **저장된 파일을 다시 읽어** 이 모듈로 보냅니다(채널에 올라간 내용과 디스크의 내용이 어긋나면 알림을 믿을 수 없으므로). 잡이 아니라 잡들이 가져다 쓰는 부품이라, 새 잡에서도 한 줄이면 됩니다.
+
+```python
+from batch import discord_notify
+discord_notify.notify(text)     # 성공 True / 실패 False (예외 없음 — 알림 실패로 결과물을 잃지 않도록)
+```
+```bash
+# 단독 실행 (웹훅 확인·수동 재전송)
+./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md
+./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md --dry-run   # 보내지 않고 본문만 확인
+```
+- 설정은 `batch/.env` 의 `DISCORD_WEBHOOK_URL`(비우면 전송 건너뜀 — 이 값이 곧 on/off 스위치), `DISCORD_USERNAME`(표시 이름), `DISCORD_TIMEOUT`(기본 15초). 웹훅 URL 자체가 인증 수단이라 로그에 출력하지 않습니다.
+- Discord 본문 상한(2000자)을 넘으면 **줄 경계에서 자르고 `(...생략)`** 을 붙입니다. 전문은 원본 `.md` 파일에 남아 있으므로 여러 메시지로 쪼개지 않습니다(채널이 알림으로서 안 읽히게 되므로).
+- 자세한 규칙과 종료 코드는 [`batch/README.md`](batch/README.md#공용-모듈-discord-알림-batchdiscord_notifypy).
 
 ### cron 등록
 ```bash
@@ -310,7 +328,7 @@ crontab -e
 | `CLAUDE_CLI_EFFORT` | `medium` | `high` | 음성은 지연이 바로 체감되지만 배치는 아무도 기다리지 않음 |
 | `CLAUDE_CLI_TIMEOUT` | `60` | `300` | 배치는 주제당 웹 검색을 여러 번 도는 것이 정상 |
 
-배치 전용 키는 `BRIEFING_TOPICS`(쉼표 구분 주제 목록; 주제 하나당 claude 호출 한 번)와 `BRIEFING_OUTPUT_DIR`(기본 `batch/output`)입니다.
+배치 전용 키는 `BRIEFING_TOPICS`(쉼표 구분 주제 목록; 주제 하나당 claude 호출 한 번), `BRIEFING_OUTPUT_DIR`(기본 `batch/output`), 그리고 Discord 알림용 `DISCORD_WEBHOOK_URL` / `DISCORD_USERNAME` / `DISCORD_TIMEOUT` 입니다.
 
 - `batch/.env` 가 **없으면** 아무 설정도 적재되지 않아 잡이 종료 코드 1 로 끝납니다 — 루트 `.env` 설정으로 조용히 도는 일은 없습니다.
 - 실제 환경변수가 `.env` 보다 우선이므로 일회성 덮어쓰기가 가능합니다: `CLAUDE_CLI_EFFORT=low ./batch/run.sh`
@@ -335,51 +353,11 @@ pkill -f main_agent.py  # 프로세스 종료
 ```
 - 자동 재시작·부팅 시 자동 시작이 필요하면 `systemd user service` 사용을 권장합니다.
 
-### How to make requirements
-```
-# 로컬 오프라인 보이스 에이전트 의존성 (B안: 핵심 패키지만 정리)
-#
-# 버전 핀 방법:
-#   실제 운영 중인 Ubuntu + CUDA GPU 머신의 venv에서 아래 명령으로 버전을 확인 후,
-#   각 패키지 뒤에 ==<버전> 을 채워 넣으세요.
-#     source bin/activate
-#     pip3 freeze | grep -iE 'pyaudio|numpy|openwakeword|faster-whisper|requests|torch|transformers|scipy|uroman|cmudict'
-#
-# 설치:
-#   pip3 install -r requirements.txt
-#   # CUDA 런타임(nvidia-*)은 GPU 환경에서만 아래 별도 섹션 주석을 해제해 설치하세요.
+### 의존성 핀 갱신
+버전 핀은 [`requirements.txt`](requirements.txt) 안에서 관리합니다(설치 방법·CUDA 런타임 주석·핀 확인 명령이 모두 그 파일 상단에 있습니다). 예전에는 이 문서에 파일 내용을 통째로 복사해 두었는데, 실제 파일과 어긋난 채 방치되어 삭제했습니다.
 
-# --- 오디오 I/O ---
-pyaudio
-numpy
-scipy
-
-# --- Wake Word (호출어 감지) ---
-openwakeword
-
-# --- STT (음성 인식, CUDA 가속) ---
-faster-whisper
-
-# --- VAD (발화 종료 감지, endpointing) ---
-silero-vad
-
-# --- TTS (음성 합성) ---
-torch
-transformers
-uroman
-cmudict      # 영문 → 한글 음차 (agent/text_norm.py)
-
-# --- 기타 ---
-requests
-
-# =========================================================
-# CUDA 런타임 (GPU 전용) — Ubuntu + NVIDIA 환경에서만 필요.
-# CPU/macOS 머신에서는 설치하지 마세요. 필요 시 주석 해제.
-# =========================================================
-# nvidia-cublas-cu12
-# nvidia-cudnn-cu12==9.20.*   # ★ torch 빌드 cuDNN 버전과 반드시 일치시킬 것
-#                            #   (불일치 시 TTS 에서 CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH)
-#
-# 참고: torch 를 CUDA 빌드로 설치하려면 버전 태그(예: torch==2.x.x+cu121)를
-#       실제 운영 머신의 pip3 freeze 결과에서 그대로 복사해 위 torch 라인에 반영하세요.
+```bash
+# 운영 머신에서 실제 설치된 버전 확인 → requirements.txt 의 핀을 그 값으로 수정
+source bin/activate
+pip3 freeze | grep -iE 'pyaudio|numpy|scipy|openwakeword|faster-whisper|silero-vad|torch|transformers|uroman|cmudict|openai|requests'
 ```

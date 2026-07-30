@@ -1,11 +1,51 @@
-cmudict==1.1.3
-faster-whisper==1.2.1
-numpy==2.5.1
-openai==2.45.0
-openwakeword==0.4.0
+# 로컬 한국어 음성 에이전트 의존성 — **이 파일이 정본입니다.**
+#
+# 코드가 직접 import 하는 패키지 + 런타임에 반드시 있어야 하는 것만 적습니다(그 밖의
+# 전이 의존성은 pip 이 해결). 새 패키지를 쓰기 시작했다면 여기에 추가하세요 —
+# README.md / CLAUDE.md 의 설치 안내는 이 파일을 가리킬 뿐, 목록을 따로 들고 있지
+# 않습니다(예전에 양쪽에 목록을 두었다가 서로 어긋난 적이 있습니다).
+#
+# 설치:
+#   pip3 install -r requirements.txt
+#   # GPU(Ubuntu + NVIDIA) 환경이라면 아래 CUDA 런타임 섹션의 주석도 해제하세요.
+#
+# 핀 갱신:
+#   실제 운영 중인 머신의 venv 에서 확인한 값으로 고칩니다.
+#     source bin/activate
+#     pip3 freeze | grep -iE 'pyaudio|numpy|scipy|openwakeword|faster-whisper|silero-vad|torch|transformers|uroman|cmudict|openai|requests'
+
+# --- 오디오 I/O ---
 PyAudio==0.2.14
-requests==2.34.2
-scipy==1.18.0
+numpy==2.5.1
+scipy==1.18.0          # 마이크/재생 경로의 리샘플링 (네이티브 레이트 ↔ 16kHz)
+
+# --- Wake Word (호출어 감지) ---
+openwakeword==0.4.0
+
+# --- STT (음성 인식) ---
+faster-whisper==1.2.1
+
+# --- VAD (발화 종료 감지, endpointing) ---
+silero-vad==6.2.1      # 모델(jit)을 번들해 런타임 다운로드 없음
+
+# --- TTS (음성 합성) ---
 torch==2.13.0
 transformers==5.13.1
-uroman==1.3.1.1
+uroman==1.3.1.1        # 코드가 직접 import 하지 않는다 — transformers 의 VITS 토크나이저가
+                       # 한글을 로마자로 바꿀 때 쓴다. 빼면 TTS 가 깨지므로 지우지 말 것
+cmudict==1.1.3         # 영문 → 한글 음차 (agent/text_norm.py). 데이터 번들 → 오프라인
+
+# --- LLM 스킬 / 배치 ---
+openai==2.45.0         # hermes gateway (OpenAI 호환 API, agent/skills/hermes_api.py)
+requests==2.34.2       # Discord 웹훅 (batch/discord_notify.py)
+
+# =========================================================
+# CUDA 런타임 (GPU 전용) — Ubuntu + NVIDIA 환경에서만 필요.
+# CPU/macOS 머신에서는 설치하지 마세요. 필요 시 주석 해제.
+# =========================================================
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12==9.20.*   # ★ torch 가 빌드된 cuDNN 버전과 반드시 일치시킬 것
+#                             #   (불일치 시 TTS 에서 CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH)
+#
+# torch 를 CUDA 빌드로 설치하려면 버전 태그(예: torch==2.x.x+cu121)를 운영 머신의
+# pip3 freeze 결과에서 그대로 복사해 위 torch 라인에 반영하세요.

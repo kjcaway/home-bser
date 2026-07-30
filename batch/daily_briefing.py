@@ -4,20 +4,25 @@
     ./bin/python -m batch.daily_briefing --topic "AI 동향"    # 주제 하나만 (반복 지정 가능)
     ./bin/python -m batch.daily_briefing --stdout            # 파일 대신 표준출력
     ./bin/python -m batch.daily_briefing --output out.md     # 저장 경로 직접 지정
+    ./bin/python -m batch.daily_briefing --no-notify         # 저장만 하고 Discord 전송 생략
 
 주제 목록은 `batch/.env` 의 `BRIEFING_TOPICS`(쉼표 구분), 저장 위치는
 `BRIEFING_OUTPUT_DIR`(기본 `batch/output/`)에서 읽는다. 결과 파일명은
 `YYYY-MM-DD.md` 이고, 같은 날 다시 돌리면 **덮어쓴다** (하루에 한 번 도는 잡이므로
 누적보다 재실행 가능한 편이 낫다).
 
+저장이 끝나면 `DISCORD_WEBHOOK_URL` 이 설정된 경우에 한해 그 파일을 Discord 로 보낸다
+(`batch/discord_notify.py`). 웹훅이 없으면 조용히 넘어가므로 알림을 쓰지 않는 환경에서도
+잡은 그대로 돈다.
+
 **주제 하나가 실패해도 잡 전체를 멈추지 않는다.** 실패한 주제는 그 자리에 실패 사유를
 적고 나머지를 계속 요약한 뒤, 종료 코드로 알린다. 웹 검색 한 건이 타임아웃 났다고
 그날 브리핑이 통째로 없어지는 것이 더 나쁘기 때문이다.
 
 종료 코드 (cron 이 실패를 알아볼 수 있도록):
-    0 — 모든 주제 성공
+    0 — 모든 주제 성공 (알림을 보냈거나, 웹훅을 설정하지 않았거나)
     1 — 설정 문제로 아무것도 하지 않음 (스위치 꺼짐 / claude 없음 / 주제 없음)
-    2 — 문서는 만들었지만 실패한 주제가 하나 이상 있음
+    2 — 문서는 만들었지만 실패한 주제가 있거나 Discord 전송에 실패함
 """
 
 import argparse
@@ -29,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent.skills.claude_p import is_enabled
-from batch import claude_query
+from batch import claude_query, discord_notify
 from batch.config import load_batch_env, output_dir, read_topics
 
 EXIT_OK = 0
@@ -49,7 +54,12 @@ def parse_args():
         help="결과를 저장할 파일 경로 (기본: <BRIEFING_OUTPUT_DIR>/YYYY-MM-DD.md)")
     parser.add_argument(
         "--stdout", action="store_true",
-        help="파일로 저장하지 않고 표준출력으로 내보낸다 (cron 메일·디버깅용)")
+        help="파일로 저장하지 않고 표준출력으로 내보낸다 (cron 메일·디버깅용). "
+             "보낼 파일이 없으므로 Discord 전송도 하지 않는다.")
+    parser.add_argument(
+        "--no-notify", action="store_true",
+        help="저장만 하고 Discord 전송은 건너뛴다 (같은 날 다시 돌릴 때 채널에 "
+             "같은 브리핑을 또 올리지 않으려는 용도)")
     return parser.parse_args()
 
 
@@ -109,6 +119,34 @@ def render_document(sections, today, failed):
     return "\n".join(lines)
 
 
+def notify_document(path, skip=False):
+    """저장한 브리핑을 Discord 로 보낸다. **전송에 실패했으면 True** 를 반환한다.
+
+    메모리에 있는 문서가 아니라 **저장된 파일을 다시 읽어서** 보낸다. 채널에 올라간
+    내용과 디스크에 남은 내용이 어긋날 여지를 없애기 위함이다 — 알림을 보고 원본을
+    열었을 때 다른 글이 있으면 알림 쪽을 믿을 수 없게 된다.
+
+    웹훅을 설정하지 않은 것은 **실패가 아니다.** 알림은 선택 기능이고, 설정하지 않은
+    환경에서 브리핑이 매일 종료 코드 2 로 끝나면 cron 경보가 의미를 잃는다. 반대로
+    웹훅이 있는데 전송이 실패한 것은 알려야 한다 — 아무도 안 보는 잡이라 알림이 안
+    나갔다는 사실 자체를 알아챌 방법이 그 종료 코드뿐이다.
+    """
+    if skip:
+        print("[System] --no-notify 이므로 Discord 전송을 건너뜁니다.")
+        return False
+
+    if not discord_notify.is_enabled():
+        return False
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"[오류] 저장한 문서를 다시 읽지 못해 Discord 전송을 건너뜁니다: {e}")
+        return True
+
+    return not discord_notify.notify(text)
+
+
 def main():
     # 무엇보다 먼저 배치 .env 를 적재한다 (batch/config.load_batch_env 주석 참고).
     load_batch_env()
@@ -146,19 +184,28 @@ def main():
 
     document = render_document(sections, today, failed)
 
+    notify_failed = False
     if args.stdout:
         print()
         print(document)
+        if discord_notify.is_enabled():
+            print("[System] --stdout 이므로 Discord 전송을 건너뜁니다.")
     else:
         path = output_dir() / f"{today}.md" if args.output is None else Path(args.output)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(document, encoding="utf-8")
         print(f"[System] 저장: {path}")
+        notify_failed = notify_document(path, skip=args.no_notify)
 
     elapsed = time.monotonic() - started
     if failed:
         print(f"[System] 완료 ({elapsed:.1f}초) — 실패한 주제 {len(failed)}개: "
               f"{', '.join(failed)}")
+        return EXIT_PARTIAL
+
+    if notify_failed:
+        print(f"[System] 완료 ({elapsed:.1f}초) — 주제 {len(topics)}개 모두 성공했지만 "
+              f"Discord 전송에 실패했습니다 (문서는 저장되어 있습니다).")
         return EXIT_PARTIAL
 
     print(f"[System] 완료 ({elapsed:.1f}초) — 주제 {len(topics)}개 모두 성공")
