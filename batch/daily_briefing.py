@@ -119,6 +119,31 @@ def render_document(sections, today, failed):
     return "\n".join(lines)
 
 
+def warn_if_too_long(document):
+    """문서가 Discord 본문 예산을 넘으면 경고한다 (잡을 막지는 않는다).
+
+    분량 상한은 `claude_query.SYSTEM_PROMPT` 의 지시로만 걸려 있고, 그것은 모델이
+    지켜 줄 때만 유효한 최선 노력이다. 지켜졌는지 확인할 방법이 이 로그뿐이라
+    매 실행마다 남긴다 — 경고가 반복되면 주제 수를 줄이거나 프롬프트를 더 조인다.
+
+    웹훅을 설정하지 않았으면 아무 말도 하지 않는다. 전송하지도 않을 상한을 두고
+    매일 경고하면, 정작 전송을 켰을 때 그 경고를 이미 무시하고 있게 된다.
+    """
+    if not discord_notify.is_enabled():
+        return
+
+    total = discord_notify.content_length(document)
+    if total <= discord_notify.CONTENT_LIMIT:
+        return
+
+    print(f"[경고] 문서가 Discord 본문 상한을 넘었습니다: {total}자 "
+          f"(상한 {discord_notify.CONTENT_LIMIT}자)")
+    print("       전송 시 뒤쪽부터 잘립니다 — 주제가 하나면 마지막 항목들이, "
+          "여러 개면 뒤 주제가 통째로 빠집니다.")
+    print("       batch/claude_query.py 의 SYSTEM_PROMPT 분량 지시를 조이거나 "
+          "주제 수를 줄이세요.")
+
+
 def notify_document(path, skip=False):
     """저장한 브리핑을 Discord 로 보낸다. **전송에 실패했으면 True** 를 반환한다.
 
@@ -183,6 +208,7 @@ def main():
             failed.append(topic)
 
     document = render_document(sections, today, failed)
+    warn_if_too_long(document)
 
     notify_failed = False
     if args.stdout:
