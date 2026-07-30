@@ -68,12 +68,15 @@ Run standalone utilities:
 python timer.py 30s   # timer alarm; accepts "<N>m" or "<N>s" (e.g. 1m, 30s)
 python timer.py 30s --output-device 2   # play the alarm on a specific speaker index
 python text_to_wav.py --name out.wav --text "안녕하세요"   # TTS text → wav file (no playback)
+python -m agent.text_norm "GPU 8개로 Python 실행"   # TTS 발음 표기만 미리보기 (모델 로드 없음)
 ```
+
+`python -m agent.text_norm "<문장>"` prints what the TTS will actually pronounce (`지피유 팔개로 파이썬 실행`) without loading VITS — the fastest way to check a mispronunciation. See "Text normalization" below.
 
 Install dependencies (see `README.md` for the full list):
 
 ```bash
-pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman openai silero-vad
+pip3 install pyaudio numpy openwakeword faster-whisper requests torch transformers scipy uroman openai silero-vad cmudict
 pip3 install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.20.*"
 ```
 
@@ -94,7 +97,8 @@ The code is split into an `agent/` package with one module per pipeline stage; `
 - `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
 - `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper, model size from `STT_MODEL_SIZE` in `config.py`, currently `medium`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
-- `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play). Also `SilentTextToSpeech` — 모델 로드 없이 답변을 출력만 하는 `--off-speaker` 전용 대역 (`silent = True` 표식).
+- `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play). 합성 직전 `normalize_for_tts()` 로 텍스트를 정규화한다. Also `SilentTextToSpeech` — 모델 로드 없이 답변을 출력만 하는 `--off-speaker` 전용 대역 (`silent = True` 표식); 정규화 결과가 원문과 다르면 `🔡 [읽기]` 줄로 함께 출력한다.
+- `agent/text_norm.py` — TTS 입력 정규화. `normalize_for_tts()` (기호 → 영문 → 숫자 순), `normalize_english()` / `english_to_hangul()` (영문 → 한글 음차), `normalize_numbers()` (숫자 → 한자어 읽기, 소수·자릿수 쉼표 포함), `normalize_symbols()`. 모델을 로드하지 않으므로 `python -m agent.text_norm "문장"` 으로 단독 실행해 발음을 미리 볼 수 있다. 아래 "Text normalization" 참고.
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
   - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask()`, `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
@@ -181,7 +185,7 @@ The original design (documented in `GEMINI.md`) routed transcribed text to a loc
 
 ### LLM stage (hermes gateway)
 
-`agent/skills/hermes_api.py` sends any utterance no other skill claimed to a **hermes gateway** OpenAI-compatible server (`hermes gateway`, port 8642, model `qwen3:8b`) and speaks the reply. It calls the `openai` SDK with only `base_url` swapped; `max_retries=0` so a dead gateway fails fast instead of stalling the voice turn. qwen3 can emit `<think>…</think>` blocks even with thinking disabled, so `strip_think()` removes them before TTS, and the system prompt demands one or two short plain-text Korean sentences (the answer is read aloud).
+`agent/skills/hermes_api.py` sends any utterance no other skill claimed to a **hermes gateway** OpenAI-compatible server (`hermes gateway`, port 8642, model `qwen3:8b`) and speaks the reply. It calls the `openai` SDK with only `base_url` swapped; `max_retries=0` so a dead gateway fails fast instead of stalling the voice turn. qwen3 can emit `<think>…</think>` blocks even with thinking disabled, so `strip_think()` removes them before TTS, and the system prompt demands one or two short plain-text Korean sentences (the answer is read aloud) **written with English words transliterated into Hangul** (`Python` → 파이썬, `GPU` → 지피유) — see "Text normalization" for why the TTS model can't take the alphabet.
 
 Config comes from a **git-ignored `.env`** in the project root — copy `.env.example` and fill it in. `load_env_file()` in `agent/config.py` parses it with the stdlib (no `python-dotenv` dependency): `KEY=VALUE` per line, `#` comments and blank lines skipped, surrounding quotes stripped, and **real environment variables always win** over `.env` values. Keys: `HERMES_ENABLED`, `HERMES_BASE_URL`, `HERMES_API_KEY`, `HERMES_MODEL`, `HERMES_TIMEOUT`.
 
@@ -211,8 +215,10 @@ claude --print --output-format json [--model …] [--effort …] --append-system
 
   Note this is reachable by config alone: `load_env_file()` writes empty `.env` values into `os.environ`, and `os.environ.get(key, DEFAULT)` only falls back to the default when the key is **absent** — so `CLAUDE_CLI_ALLOWED_TOOLS=` (key present, value blank, as shipped in `.env.example`) yields `""`, never `DEFAULT_ALLOWED_TOOLS`.
 
-  Separately, `--append-system-prompt`'s "one or two short sentences" instruction measurably *reduces* tool use (one `WebSearch` instead of a `WebSearch` + three `WebFetch` chain on the same question). That is intended for a spoken reply — fewer tool calls than a bare `claude -p` in the terminal is not by itself a bug.
-- **`--append-system-prompt`** carries the same "one or two short plain-text Korean sentences" instruction as hermes, since the answer is read aloud. `strip_markdown()` then defensively removes links, list markers, code fences, and emphasis characters that web-search answers tend to include anyway.
+  Separately, `--append-system-prompt`'s brevity instruction ("최대 3문장") measurably *reduces* tool use (one `WebSearch` instead of a `WebSearch` + three `WebFetch` chain on the same question). That is intended for a spoken reply — fewer tool calls than a bare `claude -p` in the terminal is not by itself a bug.
+- **`--append-system-prompt`** carries the same spoken-reply instructions as hermes — Korean only, plain text, summarized to at most three sentences. `strip_markdown()` then defensively removes links, list markers, code fences, and emphasis characters that web-search answers tend to include anyway.
+
+  It also asks for **번역 and 음차 separately**: "translate English" alone leaves `Python` and `GPU` untouched, because proper nouns and acronyms are not things to translate — they need transliterating (파이썬, 지피유). That distinction is what the TTS model requires; see "Text normalization".
 - **`cwd` is a temp dir** (`WORK_DIR = tempfile.gettempdir()`), not the project root. Running `claude` inside this repo would load this very `CLAUDE.md` as project context, contaminating answers to ordinary questions ("서울 수도 어디야") with repo instructions.
 - **Failure paths all return `True`** (never fall through to the echo, which would be confusing for a question): a timeout speaks `TIMEOUT_MESSAGE`, any other failure or an empty answer speaks `ERROR_MESSAGE`. The one exception is a **missing `claude` binary** (`shutil.which`), which returns `False` so the turn degrades to hermes/echo; the warning prints once (`_warned_missing`) instead of every turn.
 - **Waiting sound** — identical contract to the hermes section above (delay threshold, `stop()` before `tts.speak()` on every path). It matters more here: a web-search turn can run well past hermes' latency.
@@ -224,6 +230,37 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFF
 ### TTS single source
 
 `agent/tts.py` (`TextToSpeech`) is the only TTS implementation; `timer.py` and `text_to_wav.py` import it.
+
+### Text normalization (why English and digits need rewriting)
+
+The `mms-tts-kor` tokenizer's vocab is **26 tokens** — `abcdeghijklmnoprstuwy` plus quote characters. Korean reaches it through uroman romanization (`안녕하세요` → `annyeonghaseyo`), but nothing else has a path in. Three things break, all silently:
+
+- **Digits** are absent from the vocab → dropped entirely (`65도` → `do`).
+- **English passes through as spelling**, so the model reads it with *Korean* romanization rules (`python` → roughly "프이톤"), and **f/q/v/x/z aren't in the vocab at all** → they vanish. `Fox quiz vex` reaches the model as `o ui e`; `Netflix` as `netli`.
+- **Symbols** (`%`, `℃`, `°`) are dropped like digits.
+
+`agent/text_norm.py` therefore rewrites all three **into Hangul** before tokenization. Hangul is the point: the rewritten text then takes the same uroman path as the rest of the sentence, so the model only ever sees the Korean-romanization distribution it was trained on. `synthesize_to_file()` calls `normalize_for_tts()` as its first step.
+
+Order is **symbols → English → numbers**, and it matters: `°C` must be consumed before the English pass, or that pass claims the `C` and yields "도씨"; English must run before numbers, or `MP3` splits into `MP` + `삼` and camel-case splitting misfires.
+
+**English → Hangul** (`english_to_hangul()`) tries four things in order:
+
+1. `_OVERRIDES` — words whose conventional Korean spelling differs from what the rules produce (`python` → 파이썬 not 파이산, `docker` → 도커 not 다커), plus units that would otherwise be spelled out letter by letter (`km` → 킬로미터, not 케이엠).
+2. All-caps tokens → letter names (`AI` → 에이아이, `USB` → 유에스비), except `_ACRONYM_AS_WORD` entries like `NASA`.
+3. CMU pronouncing dictionary → ARPAbet → Hangul via `_arpabet_to_hangul()`. Camel case is split first, so `ChatGPT` → `Chat` + `GPT` → 챗지피티. Overrides are checked on the **whole token before splitting**, or `YouTube` would never match its `youtube` entry and would come out 유투브.
+4. OOV → `_spell_to_arpabet()`, crude spelling rules feeding the same composer. This is what handles proper nouns newer than the dictionary (`anthropic` → 앤스로픽).
+
+`_arpabet_to_hangul()` follows 외래어 표기법 rather than transcribing phone-by-phone, because Korean coda rules are what make the result sound right:
+
+- Only 짧은 모음 + 어말/자음앞 무성 파열음 becomes a 받침 (`book` → 북, `cap` → 캡) — otherwise `으` is appended (`take` → 테이크, `desk` → 데스크). The stop must be **immediately** after the vowel; without that check the `K` in `desk` attaches to `스` and yields 데슥.
+- `[l]` before a vowel doubles to ㄹㄹ (`claude` → 클로드, `hello` → 헬로, `class` → 클래스). Without this, initial clusters come out 크로드/크래스.
+- Coda `[r]` is not written (`car` → 카, `server` → 서버), since cmudict is rhotic and Korean loanwords are not.
+- `AO` is deliberately **not** in `_SHORT_VOWELS` (it's long) — including it turns `walk`/`talk`/`blog` into 웍/톡/블록.
+- Only `[b]` is in `_FINAL_VOICED_STOPS` (`club` → 클럽, `web` → 웹). `[g]` and `[d]` are excluded because `그`/`드` dominate actual usage (`tag` 태그, `bug` 버그, `bed` 베드).
+
+`cmudict` is a required dependency: a single ~940 KB wheel that **bundles** its data, so there is no runtime download and the offline property holds. It is imported lazily on the first English word (~0.17 s once, then negligible), and if it is missing the module warns once and falls back to the spelling rules rather than failing a voice turn.
+
+Both LLM skills' system prompts also ask for Hangul transliteration (see the two LLM sections above), so most replies arrive already converted. `text_norm` is the safety net for what slips through — and the only thing covering the echo fallback and timer messages, which no prompt touches.
 
 ## Environment assumptions
 

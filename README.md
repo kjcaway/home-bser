@@ -66,6 +66,7 @@ flowchart TD
 | 호출어 감지 | `agent/wakeword.py` | `load_wakeword_model()`, `get_score()` |
 | STT (음성→텍스트) | `agent/stt.py` | `load_stt_model()`, `transcribe_pcm()` |
 | TTS (텍스트→음성) | `agent/tts.py` | `TextToSpeech.speak()`, `SilentTextToSpeech` (무음 테스트용) |
+| TTS 입력 정규화 | `agent/text_norm.py` | `normalize_for_tts()`, `english_to_hangul()`, `normalize_numbers()` |
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
 | 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
 | 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
@@ -89,6 +90,7 @@ pip3 install requests
 pip3 install torch transformers scipy
 pip3 install uroman
 pip3 install silero-vad   # 발화 종료 감지(VAD endpointing). 모델을 번들해 오프라인 로드
+pip3 install cmudict      # 영문 → 한글 음차용 발음 사전. 데이터를 번들해 오프라인 로드
 ```
 
 > **cuDNN 버전 핀 주의**
@@ -140,6 +142,35 @@ python main_agent.py --off-speaker "대한민국의 수도는 어디야?"
 - 오디오 장치를 열지 않고 whisper·VITS 모델도 로드하지 않으므로 **즉시 실행**되고, 마이크/스피커가 없는 머신(CI·SSH 세션)에서도 동작합니다.
 - 소리를 내는 경로는 모두 함께 막힙니다: 타이머 스킬은 알람 서브프로세스(`timer.py`)를 띄우지 않고 무엇을 실행했을지만 로그로 남기고, LLM 스킬의 대기음도 재생되지 않습니다.
 - 처리 후 바로 종료합니다(대기 루프로 돌아가지 않음).
+
+### TTS 발음 정규화 (영문·숫자·기호)
+TTS 모델(`mms-tts-kor`)의 토크나이저 vocab 은 **26자**(`abcdeghijklmnoprstuwy` + 따옴표류)뿐입니다. 한국어는 uroman 로마자화를 거쳐 들어가지만 그 밖의 문자는 들어갈 길이 없어, 세 가지가 **조용히** 깨집니다.
+
+| 입력 | 모델이 실제로 받던 것 | 증상 |
+| --- | --- | --- |
+| `65도` | `do` | 숫자가 통째로 무음 |
+| `Fox quiz vex` | `o ui e` | f/q/v/x/z 는 vocab 에 없어 소실 |
+| `Netflix` | `netli` | 남은 글자도 **한국어 로마자**로 잘못 읽힘 |
+| `20%`, `31℃` | (없음) | 기호 무음 |
+
+그래서 `agent/text_norm.py` 가 합성 직전에 셋 모두를 **한글로** 바꿔 넣습니다. 한글로 바꾸는 것이 핵심입니다 — 그래야 문장의 나머지와 똑같이 uroman 을 타서, 모델이 학습한 한국어 로마자 분포 안에 머뭅니다.
+
+```bash
+# 모델을 로드하지 않고 발음 표기만 확인
+python -m agent.text_norm "GPU 8개로 Python 실행" "최고기온 31℃, 강수확률 20%"
+```
+```
+GPU 8개로 Python 실행       ->  지피유 팔개로 파이썬 실행
+최고기온 31℃, 강수확률 20%  ->  최고기온 삼십일도, 강수확률 이십퍼센트
+```
+
+- **영문** — 관용 표기 사전(`파이썬`, `도커`, `km`→킬로미터) → 대문자 약어 낱자 읽기(`AI`→에이아이) → CMU 발음사전 기반 음차(외래어 표기법 근사) → 사전에 없으면 철자 규칙 폴백(`anthropic`→앤스로픽) 순으로 시도합니다. 카멜케이스는 분리합니다(`ChatGPT`→챗지피티).
+- **숫자** — 한자어 읽기. 소수(`8.5`→팔점오)와 자릿수 쉼표(`1,234`→천이백삼십사)도 처리합니다.
+- **기호** — `%`→퍼센트, `℃`→도, `~`→에서 등.
+- `--off-speaker` 는 정규화 결과가 원문과 다르면 `🔡 [읽기]` 줄로 함께 출력하므로, 소리 없이도 발음을 확인할 수 있습니다.
+- `cmudict` 는 데이터를 번들한 단일 휠(~940KB)이라 **런타임 다운로드가 없고** 오프라인 성질이 유지됩니다. 첫 영단어에서 한 번만(약 0.17초) 지연 로드하며, 패키지가 없으면 경고 후 철자 규칙으로 degrade 합니다.
+
+> LLM 스킬(`claude_p`, `hermes_api`)의 시스템 프롬프트도 "영문·약어는 한글 음차로" 를 요구하므로 답변 대부분은 이미 한글로 옵니다. 이 정규화는 그래도 새어 나오는 것을 받는 **안전망**이자, 프롬프트가 닿지 않는 에코 폴백·타이머 안내 문구를 담당합니다.
 
 ### LLM 백엔드 설정 (`.env`)
 질문에 답하는 catch-all 스킬은 두 가지이고, 모두 프로젝트 루트의 **git-ignored `.env`** 로 켭니다. `cp .env.example .env` 후 값을 채우세요. 둘 다 꺼져 있으면(= `.env` 없음) 인식 결과를 그대로 읽어주는 에코 폴백이 동작하므로, 개발환경은 설정 없이 그대로 돌아갑니다.
@@ -211,7 +242,7 @@ pkill -f main_agent.py  # 프로세스 종료
 #   실제 운영 중인 Ubuntu + CUDA GPU 머신의 venv에서 아래 명령으로 버전을 확인 후,
 #   각 패키지 뒤에 ==<버전> 을 채워 넣으세요.
 #     source bin/activate
-#     pip3 freeze | grep -iE 'pyaudio|numpy|openwakeword|faster-whisper|requests|torch|transformers|scipy|uroman'
+#     pip3 freeze | grep -iE 'pyaudio|numpy|openwakeword|faster-whisper|requests|torch|transformers|scipy|uroman|cmudict'
 #
 # 설치:
 #   pip3 install -r requirements.txt
@@ -235,6 +266,7 @@ silero-vad
 torch
 transformers
 uroman
+cmudict      # 영문 → 한글 음차 (agent/text_norm.py)
 
 # --- 기타 ---
 requests
