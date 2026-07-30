@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An offline-first, local Korean voice assistant ("home agent") intended to run on Ubuntu with an NVIDIA GPU. The pipeline — wake word → speech-to-text → intent handling → text-to-speech — runs entirely on local CPU/GPU. The one stage that can leave the machine is the optional LLM answer step: hermes keeps it local (127.0.0.1), while the Claude Code CLI skill calls the cloud and is off by default (see "Environment assumptions"). `main_agent.py` is the entry point (a thin orchestrator); the implementation lives in the `agent/` package.
 
-Note: the repo root **is itself the Python venv** (`bin/`, `include/`, `lib/`, `pyvenv.cfg` are venv artifacts, git-ignored). Source lives directly at the root alongside them.
+Alongside the voice loop there is a second, unattended entry path: `batch/` holds **정기 실행(배치) 잡** — work too slow to do inside a voice turn, run from cron instead. It shares the `agent/` package but reads its **own `batch/.env`**, never the root one (see "Batch jobs" below).
+
+Note: the repo root **is itself the Python venv** (`bin/`, `include/`, `lib/`, `pyvenv.cfg` are venv artifacts, git-ignored). Source lives directly at the root alongside them. This is also why batch scripts could not go in `bin/` — the venv owns that name.
 
 ## Python 코드 규칙 (one class per file)
 
@@ -25,12 +27,16 @@ Three consequences worth knowing **before** writing new code, because each one i
 - **A helper shared by two class modules needs a third, lower module.** `MicStream` (capture) and `play_wav_file` (playback) both need `supports_format()` / `downmix_to_mono()`. They live in `agent/audio_format.py`, a leaf that imports no other audio module — putting them in either caller would make the two import each other.
 - **Splitting a function module is a cohesion judgement, not this rule.** The rule never forces a function module to split. `agent/audio_io.py` was split into `audio_device` / `audio_record` / `audio_play` because it had grown three unrelated jobs, not because it was long.
 
+The rule applies to `batch/` too — those modules are currently all function modules.
+
 Check compliance mechanically (no judgement, no grep guessing):
 
 ```bash
 ./bin/python - <<'PY'
 import ast, pathlib
-for f in sorted(pathlib.Path(".").glob("*.py")) + sorted(pathlib.Path("agent").rglob("*.py")):
+for f in (sorted(pathlib.Path(".").glob("*.py"))
+          + sorted(pathlib.Path("agent").rglob("*.py"))
+          + sorted(pathlib.Path("batch").rglob("*.py"))):
     top = ast.parse(f.read_text(encoding="utf-8")).body
     cls = [n.name for n in top if isinstance(n, ast.ClassDef)]
     fns = [n.name for n in top if isinstance(n, ast.FunctionDef)]
@@ -104,6 +110,16 @@ python -m agent.text_norm "GPU 8개로 Python 실행"   # TTS 발음 표기만 �
 
 `python -m agent.text_norm "<문장>"` prints what the TTS will actually pronounce (`지피유 팔개로 파이썬 실행`) without loading VITS — the fastest way to check a mispronunciation. See "Text normalization" below.
 
+Run batch jobs (from the repo root; see "Batch jobs" below):
+
+```bash
+cp batch/.env.example batch/.env                 # 최초 1회 (루트 .env 와 별개)
+python -m batch.daily_briefing                   # 정기 LLM 요약 → batch/output/YYYY-MM-DD.md
+python -m batch.daily_briefing --topic "AI 동향"   # 주제 하나만 (반복 지정 가능)
+python -m batch.daily_briefing --stdout          # 파일 저장 없이 출력만
+./batch/run.sh                                   # cron 래퍼 (cwd·PATH·로그 처리)
+```
+
 Install dependencies (see `README.md` for the full list):
 
 ```bash
@@ -120,7 +136,7 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 
 ## Architecture
 
-The code is split into an `agent/` package with one module per pipeline stage — subdivided further by the one-class-per-file rule above, so a stage that has both a class and functions occupies two files; `main_agent.py` only wires them together:
+The code is split into an `agent/` package with one module per pipeline stage — subdivided further by the one-class-per-file rule above, so a stage that has both a class and functions occupies two files; `main_agent.py` only wires them together. `batch/` sits **on top of** this package (it imports `agent`, never the reverse) and is listed separately at the end:
 
 - `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the wake-word thresholds (`WAKE_THRESHOLD`, `BARGE_IN_ENABLED` / `BARGE_IN_THRESHOLD`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` / `--list-devices` / `--debug-record` / `--off-speaker` argparse logic, returns a `RunConfig`), `load_env_file()` (reads the git-ignored `.env` into `os.environ`), and its `_env_bool()` / `_env_float()` readers (empty or unparseable value → warn and keep the default, so a bad `.env` line can't kill a voice turn).
 - `agent/run_config.py` — `RunConfig` NamedTuple: 실행 인자 + 환경 프리셋을 해석한 결과 (`device`, `stt_compute_type`, 장치 이름/인덱스, `list_devices`, `debug_record`, `off_speaker`, `barge_in_*`). 만드는 쪽은 `config.parse_device_args()` — 값 객체만 따로 두는 이유는 위의 코드 규칙(클래스 파일 하나에 클래스 하나) 때문이다.
@@ -143,6 +159,11 @@ The code is split into an `agent/` package with one module per pipeline stage �
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
   - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask(question, cancel_event=None)` (`Popen` + 워커 스레드, 취소 시 프로세스 kill), `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
   - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask(question, cancel_event=None)` (워커 스레드, 취소 시 결과 폐기), `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (hermes gateway)" 참고).
+- `batch/` — 정기 실행(배치) 잡. 모듈 하나가 잡 하나이며, 오디오도 모델도 건드리지 않는다 (아래 "Batch jobs" 참고):
+  - `batch/config.py` — `BATCH_DIR`, `DEFAULT_OUTPUT_DIR`, `load_batch_env()` (배치 전용 `.env` 적재 — 루트 `.env` 와의 분리를 담당하는 유일한 장치), `read_topics()`, `output_dir()`.
+  - `batch/claude_query.py` — 배치용 claude CLI 질의: `build_command()`, `ask(question, timeout=None)` (`subprocess.run`, 기본 300초), `fix_bullets()`, `describe_options()`. 모델/effort 해석과 실행 디렉터리는 `claude_p` 에서 import 한다.
+  - `batch/daily_briefing.py` — 정기 LLM 요약 잡: `main()`, `parse_args()`, `build_prompt()`, `summarize_topic()`, `render_document()`.
+  - `batch/run.sh` — cron 래퍼 (cwd → 저장소 루트, PATH 보강, `batch/logs/` 로 로깅). Python 이 아니므로 코드 규칙과 무관.
 
 Models are loaded once inside `main()` (not at import time), so other scripts can import individual `agent` modules without pulling in the whole pipeline. Skills load no models themselves — `handle(user_text, tts)` receives the `TextToSpeech` instance from the caller.
 
@@ -300,6 +321,25 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFF
 
 `CLAUDE_CLI_ENABLED` is **explicit opt-in — unset means off**, unlike `HERMES_ENABLED`'s backward-compatible key-presence fallback. The claude CLI needs no API key, so "installed ⇒ enabled" would silently route every dev utterance to the cloud. Only `1`/`true`/`yes`/`on` turns it on; anything else (including an unrecognized value, which warns) is off.
 
+### Batch jobs (`batch/`)
+
+Work that is too slow for a voice turn, or that should run without anyone asking, lives in `batch/` and runs from cron: `python -m batch.<잡이름>` from the repo root. The one job today is **정기 LLM 요약** (`batch/daily_briefing.py`) — it walks a topic list, asks the Claude Code CLI to summarize each with web search, and writes one markdown file per day (`batch/output/YYYY-MM-DD.md`, overwritten on re-run). Details and cron setup: `batch/README.md`.
+
+**`python batch/daily_briefing.py` does not work, and that is why `-m` is the documented form.** Running a file inside the package puts `sys.path[0]` at `batch/`, so `import agent` fails; `-m` puts the cwd (repo root) on the path instead. The same cwd matters for a second reason — `agent/config.py`'s file paths are relative (`soundfile/…`) and the default output dir is repo-relative — so `batch/run.sh` `cd`s to the root before doing anything.
+
+**Config isolation is one function, and it works by pre-emption.** `agent.config.load_env_file()` parses only on its **first** call (module-global guard), and the skills call it with no argument (root `.env`) from inside `is_enabled()`. `batch/config.py`'s `load_batch_env()` calls it first with `batch/.env`, so every later call is a no-op and the root `.env` is never read. Two consequences:
+
+- The guard is set **before** the file-existence check, so a *missing* `batch/.env` also blocks the root one. A batch job with no config exits with code 1 rather than quietly running on the voice agent's settings — which is the failure mode worth having, since the two want different models and timeouts.
+- Because the isolation is an ordering contract, `load_batch_env()` is called at the top of **every** batch entry function, not just `main()`. Whichever one you call first wins, so there is no order to remember (the same reason the skills re-call `load_env_file()` in each `is_enabled()`).
+
+`batch/.env` is already covered by `.gitignore`'s `.env` pattern (no slash ⇒ matches at any depth); `batch/.env.example` is not, so it is committed as the template. Real environment variables still beat both, which is what makes `CLAUDE_CLI_EFFORT=low ./batch/run.sh` work for a one-off.
+
+**Why `batch/claude_query.py` re-assembles the CLI command instead of calling `claude_p.ask()`.** Three things differ, all from "heard vs. read": the system prompt asks for a markdown list rather than three plain sentences with Hangul transliteration (a file has none of the TTS vocab limits); nothing strips markdown, since that *is* the deliverable; and there is no barge-in to watch, so a plain `subprocess.run` with a much longer default timeout (300 s vs 60 s) replaces the `Popen`+thread dance. What it does **not** duplicate is `resolve_model()` / `resolve_effort()` / `WORK_DIR` — those are imported, because a second copy of the alias table drifts and then the same `.env` value runs a different model in voice than in batch (the reason `test-claude-cli.py` imports them too).
+
+`fix_bullets()` is the one piece of post-processing: the model intermittently drops the space in `-항목`, which then renders as literal text instead of a list item. It repairs `-` only — not `*` (line-initial `*` may be emphasis) and not `-` followed by a digit (`-5도` is a negative number, and "fixing" it would change 영하 5도 into 5도). Missing a real bullet is cosmetic; corrupting a number is not.
+
+**Failure posture: one topic, not the whole day.** Each topic is a separate CLI call; a failure writes the reason into that section and the rest continue. Exit code tells cron what happened — `0` all succeeded, `1` did nothing (switch off / no `claude` / no topics), `2` document written with at least one failed topic. There is no hermes fallback here, unlike the voice chain: web search is the point of the job, so a local model can't stand in.
+
 ### TTS single source
 
 `agent/text_to_speech.py` (`TextToSpeech`) is the only TTS implementation; `text_to_wav.py` imports it, and `timer.py` shares its playback path (`agent/audio_play.py`).
@@ -341,16 +381,20 @@ Both LLM skills' system prompts also ask for Hangul transliteration (see the two
 - **The agent is no longer 100% offline when hermes is enabled** — but hermes runs locally (127.0.0.1), so no cloud APIs are involved and the offline property holds at the network boundary.
 - **`CLAUDE_CLI_ENABLED=1` does break the offline property**, unlike hermes: `agent/skills/claude_p.py` shells out to Claude Code CLI, which calls the Anthropic API (and, with `--allowedTools "WebSearch,WebFetch"`, the open web). That is the point of the skill — answering questions a local model can't — but it means utterances leave the machine. Off by default.
 - Both LLM stages are gated by `.env` (`CLAUDE_CLI_ENABLED`; `HERMES_ENABLED`, falling back to `HERMES_API_KEY` presence when unset), not by `--environment`. In practice that means prod-only, since dev has no `.env`.
+- **`batch/` reads `batch/.env`, never the root `.env`** — so enabling the claude CLI for batch summaries does *not* enable it for voice turns, and vice versa. The same key names are reused with different values on purpose (voice keeps the timeout short because latency is felt; batch sets 300 s because nobody is waiting). A batch job with no `batch/.env` exits with code 1 instead of borrowing the voice settings. Batch summaries are cloud + web calls by definition, so the offline property does not apply to them at all.
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
-- A mic and a speaker are required for the normal loop, but **not** for `--off-speaker`, which opens no audio device at all.
+- A mic and a speaker are required for the normal loop, but **not** for `--off-speaker`, which opens no audio device at all. Batch jobs need neither — they open no audio device and load no model.
+- Both entry paths must run **from the repo root** (relative file paths); `batch/run.sh` enforces this for cron, which otherwise starts in `$HOME`.
 - Code comments, prompts, and print output are in Korean.
 
 ## Docs
 
 - `README.md` — venv + pip setup.
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
-- `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns, barge-in switch/threshold).
+- `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns, barge-in switch/threshold). Covers the **voice agent only** — batch has its own.
+- `batch/README.md` — batch job list, cron 등록(래퍼가 처리하는 cwd/PATH/로그), 종료 코드, 설정 격리 방식, 새 잡 추가 절차.
+- `batch/.env.example` — template for the git-ignored `batch/.env` (batch-side Claude CLI settings, `BRIEFING_TOPICS`, `BRIEFING_OUTPUT_DIR`).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
 - `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model, `--effort` to set thinking depth).
 

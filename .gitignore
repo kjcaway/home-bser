@@ -13,4 +13,9 @@ __pycache__/
 response.wav
 
 # 로컬 환경변수 (API 키 등). 템플릿은 .env.example 참고
+# 슬래시가 없으므로 하위 경로에도 적용된다 (batch/.env 포함)
 .env
+
+# 배치 잡 산출물 (batch/README.md 참고)
+batch/output/
+batch/logs/

@@ -79,6 +79,9 @@ flowchart TD
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
 | 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
 | 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
+| 배치: 설정 | `batch/config.py` | `load_batch_env()`, `read_topics()`, `output_dir()` |
+| 배치: claude 질의 | `batch/claude_query.py` | `ask()`, `build_command()`, `fix_bullets()` |
+| 배치: 정기 LLM 요약 | `batch/daily_briefing.py` | `main()`, `summarize_topic()`, `render_document()` |
 
 > 모델(Wake Word / STT / TTS)은 import 시점이 아니라 `main()` 안에서 **한 번만** 로드됩니다. 덕분에 다른 스크립트가 `agent` 하위 모듈을 개별 import 해도 전체 파이프라인이 딸려오지 않습니다.
 
@@ -184,7 +187,7 @@ GPU 8개로 Python 실행       ->  지피유 팔개로 파이썬 실행
 > LLM 스킬(`claude_p`, `hermes_api`)의 시스템 프롬프트도 "영문·약어는 한글 음차로" 를 요구하므로 답변 대부분은 이미 한글로 옵니다. 이 정규화는 그래도 새어 나오는 것을 받는 **안전망**이자, 프롬프트가 닿지 않는 에코 폴백·타이머 안내 문구를 담당합니다.
 
 ### LLM 백엔드 설정 (`.env`)
-질문에 답하는 catch-all 스킬은 두 가지이고, 모두 프로젝트 루트의 **git-ignored `.env`** 로 켭니다. `cp .env.example .env` 후 값을 채우세요. 둘 다 꺼져 있으면(= `.env` 없음) 인식 결과를 그대로 읽어주는 에코 폴백이 동작하므로, 개발환경은 설정 없이 그대로 돌아갑니다.
+질문에 답하는 catch-all 스킬은 두 가지이고, 모두 프로젝트 루트의 **git-ignored `.env`** 로 켭니다. (이 절은 음성 파이프라인 전용입니다 — 배치 잡은 `batch/.env` 를 따로 읽습니다. [배치 잡](#배치-잡-정기-llm-요약) 참고.) `cp .env.example .env` 후 값을 채우세요. 둘 다 꺼져 있으면(= `.env` 없음) 인식 결과를 그대로 읽어주는 에코 폴백이 동작하므로, 개발환경은 설정 없이 그대로 돌아갑니다.
 
 | 백엔드 | 스위치 | 특징 |
 | --- | --- | --- |
@@ -260,6 +263,58 @@ PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마�
 - 소리는 멀쩡한데 전사만 틀림 → STT 파라미터/모델 쪽에서 접근.
 
 깨끗한 wav 로 오프라인 벤치마크를 하려면 `text_to_wav.py` 로 한국어 샘플을 만들고 `agent/stt.py` 의 `transcribe_pcm` 을 직접 호출해 비교하면 됩니다.
+
+## 배치 잡 (정기 LLM 요약)
+음성 턴 안에서 하기엔 너무 느리거나, 부르지 않아도 돌아야 하는 작업은 `batch/` 에 두고 cron 으로 돌립니다. 현재 잡은 하나입니다 — **정기 LLM 요약**(`batch/daily_briefing.py`): 관심 주제 목록을 claude CLI 의 웹 검색으로 훑어 날짜별 마크다운으로 남깁니다. 자세한 내용은 [`batch/README.md`](batch/README.md).
+
+```bash
+# 저장소 루트에서
+cp batch/.env.example batch/.env      # 최초 1회: 주제·모델 설정 (루트 .env 와 별개)
+./bin/python -m batch.daily_briefing
+```
+```
+[System] 2026-07-30 브리핑 시작 — 주제 1개
+[1/1] '오픈소스 LLM 동향' 요약 중...
+[System] claude CLI 모델: claude-sonnet-5 / effort: low
+[System] claude 턴 수: 4 (검색 사용)
+[완료] '오픈소스 LLM 동향' (26.6초)
+[System] 저장: batch/output/2026-07-30.md
+[System] 완료 (26.6초) — 주제 1개 모두 성공
+```
+- `claude 턴 수` 는 검색을 실제로 썼는지 보는 가장 싼 지표입니다 — `1` 이면 모델이 기억으로만 답한 것이니, 최신 정보를 기대했다면 `CLAUDE_CLI_ALLOWED_TOOLS` 를 확인하세요.
+- 소요 시간은 주제 수와 `CLAUDE_CLI_EFFORT` 에 비례합니다 (위는 주제 1개 · `effort=low` 측정치).
+
+- 결과는 `batch/output/YYYY-MM-DD.md`. 같은 날 다시 돌리면 덮어씁니다.
+- `--topic "주제"`(반복 가능)로 주제 하나만, `--stdout` 으로 파일 없이 출력만, `--output 경로`로 저장 위치를 지정할 수 있습니다.
+- **`python batch/daily_briefing.py` 로는 실행하지 않습니다.** 그렇게 부르면 `sys.path[0]` 이 `batch/` 가 되어 `import agent` 가 깨집니다. `-m` 을 쓰세요(`python -m agent.text_norm` 과 같은 방식).
+- 주제 하나가 실패해도 잡 전체를 멈추지 않습니다. 실패 사유를 그 자리에 적고 나머지를 계속 요약한 뒤, 종료 코드로 알립니다: `0` 전부 성공, `1` 설정 문제로 아무것도 안 함, `2` 문서는 만들었지만 실패한 주제 있음.
+
+### cron 등록
+```bash
+chmod +x batch/run.sh
+crontab -e
+```
+```cron
+# 매일 07:00 브리핑
+0 7 * * * /path/to/home-bser/batch/run.sh
+```
+`batch/run.sh` 가 cron 특유의 문제 셋을 대신 처리합니다 — **cwd**(설정의 파일 경로가 상대경로이므로 저장소 루트로 이동), **PATH**(cron 의 PATH 는 최소한이라 `claude` 를 못 찾기 쉬움), **로그**(`batch/logs/YYYY-MM-DD.log`; cron 의 메일 출력은 서버에 메일이 없으면 사라짐).
+
+> 등록 직후에는 cron 을 기다리지 말고 `./batch/run.sh` 를 직접 한 번 돌려보세요. claude CLI 는 로그인 인증을 쓰므로, 대화형 셸에서 되던 것이 cron 사용자 환경에서는 인증을 못 찾아 실패할 수 있습니다 (PATH 와는 다른 문제이고, 로그를 봐야 구분됩니다).
+
+### 설정은 `batch/.env` 로 분리됩니다
+배치 잡은 루트 `.env` 를 **읽지 않습니다.** `batch/config.py` 의 `load_batch_env()` 가 먼저 `batch/.env` 를 적재하면, 이후 스킬 내부의 `load_env_file()` 호출이 no-op 이 되기 때문입니다(첫 호출만 파싱하는 전역 가드). 같은 키 이름을 쓰지만 값은 목적에 맞게 다르게 잡습니다.
+
+| 키 | 음성(`.env`) | 배치(`batch/.env`) | 이유 |
+| --- | --- | --- | --- |
+| `CLAUDE_CLI_EFFORT` | `medium` | `high` | 음성은 지연이 바로 체감되지만 배치는 아무도 기다리지 않음 |
+| `CLAUDE_CLI_TIMEOUT` | `60` | `300` | 배치는 주제당 웹 검색을 여러 번 도는 것이 정상 |
+
+배치 전용 키는 `BRIEFING_TOPICS`(쉼표 구분 주제 목록; 주제 하나당 claude 호출 한 번)와 `BRIEFING_OUTPUT_DIR`(기본 `batch/output`)입니다.
+
+- `batch/.env` 가 **없으면** 아무 설정도 적재되지 않아 잡이 종료 코드 1 로 끝납니다 — 루트 `.env` 설정으로 조용히 도는 일은 없습니다.
+- 실제 환경변수가 `.env` 보다 우선이므로 일회성 덮어쓰기가 가능합니다: `CLAUDE_CLI_EFFORT=low ./batch/run.sh`
+- `batch/.env` 는 루트 `.gitignore` 의 `.env` 패턴에 이미 걸려 커밋되지 않습니다. `batch/output/` 과 `batch/logs/` 도 무시됩니다.
 
 ## How to run in production (상시 실행)
 SSH 연결이 닫혀도 프로세스가 종료되지 않도록 `nohup` 으로 백그라운드 실행합니다.
