@@ -5,6 +5,7 @@ import numpy as np
 from agent.config import (
     CHUNK,
     RATE,
+    WAKE_THRESHOLD,
     WAKE_RESPONSE_FILE,
     STT_MIN_RECORD_SECONDS,
     STT_MAX_RECORD_SECONDS,
@@ -13,21 +14,25 @@ from agent.config import (
     STT_MODEL_SIZE,
     parse_device_args,
 )
-from agent.audio_io import (
-    open_input_stream,
-    record_until_silence,
-    play_wav_file,
-    flush_input_stream,
+from agent.audio_device import (
     list_input_devices,
     list_output_devices,
     resolve_devices,
+)
+from agent.audio_play import play_wav_file
+from agent.audio_record import (
+    open_input_stream,
+    record_until_silence,
+    flush_input_stream,
     save_pcm_wav,
 )
 import pyaudio
 from agent.wakeword import load_wakeword_model, get_score, reset_wakeword_state
+from agent.barge_in_listener import BargeInListener
 from agent.stt import load_stt_model, transcribe_pcm
-from agent.vad import load_vad
-from agent.tts import TextToSpeech, SilentTextToSpeech
+from agent.silero_vad import SileroVAD
+from agent.text_to_speech import TextToSpeech
+from agent.silent_text_to_speech import SilentTextToSpeech
 from agent.skills import timer, claude_p, hermes_api
 
 
@@ -85,14 +90,23 @@ def run_text_turn(user_text):
     print(f"\n[System] 처리 소요: {time.monotonic() - t_start:.1f}초")
 
 
-def run_turn(stream, vad, whisper_model, tts, oww_model, output_device_index, debug_record):
+def run_turn(stream, vad, whisper_model, tts, oww_model, output_device_index,
+             debug_record, barge_in=None):
     """호출어 감지 후의 한 턴(응답음 → 녹음 → STT → 명령 수행 → 대기 복귀)을 처리한다.
 
-    호출어 대기 루프(main)에서 score > 0.5 일 때 호출된다. 처리 중에는 마이크 입력을
-    멈춰 스피커 출력이 되녹음되어 호출어를 재감지하는 것을 막고, 끝나면 버퍼와
-    호출어 특징 버퍼를 비워 다음 턴을 새 상태로 시작한다.
+    호출어 대기 루프(main)에서 score > WAKE_THRESHOLD 일 때 호출된다. STT·LLM 구간에는
+    마이크 입력을 멈춰 스피커 출력이 되녹음되어 호출어를 재감지하는 것을 막고, 끝나면
+    버퍼와 호출어 특징 버퍼를 비워 다음 턴을 새 상태로 시작한다.
+
+    예외는 답변 재생 구간이다. barge_in 리스너를 넘기면 그 구간에만 마이크가 다시 열려
+    호출어를 감시하고(agent/barge_in_listener.py), 감지되면 재생을 끊는다. 그때 반환값이 True 이며,
+    호출부는 대기 루프로 돌아가지 말고 곧바로 다음 턴을 열어야 한다 — 사용자는 이미
+    호출어를 말했으므로 다시 부르게 하면 안 된다.
     """
     print("\n🔔 [Wake Word 감지!] 👂 듣고 있습니다...")
+
+    if barge_in is not None:
+        barge_in.reset()   # 지난 턴의 감지 상태를 지우고 시작
 
     # 호출 성공을 사용자에게 알리는 응답음 재생 (녹음 시작 전)
     play_wav_file(WAKE_RESPONSE_FILE, output_device_index)
@@ -136,14 +150,20 @@ def run_turn(stream, vad, whisper_model, tts, oww_model, output_device_index, de
             print(f"👤 사용자: {user_text}")
             execute_command(user_text, tts)
 
-    print("====================================================")
-    print("🎙️ 대기 중...")
+    interrupted = barge_in is not None and barge_in.triggered
+    if interrupted:
+        print("↩️  끼어들기: 대기 상태로 가지 않고 곧바로 다음 명령을 받습니다.")
+    else:
+        print("====================================================")
+        print("🎙️ 대기 중...")
 
     # 마이크 입력 재개 후, 정지 전후로 버퍼에 남아 있던 오디오를 비우고
-    # 호출어 모델의 특징 버퍼도 무음으로 초기화 (직전 호출어 재감지 방지)
+    # 호출어 모델의 특징 버퍼도 무음으로 초기화 (직전 호출어 재감지 방지 —
+    # 끼어들기로 끊긴 턴에서는 방금 감지된 그 호출어가 대상이다)
     stream.start_stream()
     flush_input_stream(stream)
     reset_wakeword_state(oww_model)
+    return interrupted
 
 
 def main():
@@ -184,7 +204,7 @@ def main():
 
     oww_model = load_wakeword_model("alexa")
     whisper_model = load_stt_model(cfg.device, cfg.stt_compute_type, STT_MODEL_SIZE)
-    vad = load_vad()   # 발화 종료 감지(endpointing)용 Silero VAD
+    vad = SileroVAD.load()   # 발화 종료 감지(endpointing)용 Silero VAD
     tts = TextToSpeech(cfg.device, output_device_index=output_device_index)
 
     print("[System] 모델 로드 완료! 에이전트가 준비되었습니다.")
@@ -193,6 +213,17 @@ def main():
     # 3. 메인 루프 (마이크 스트림 및 파이프라인)
     # ==========================================
     audio, stream = open_input_stream(input_device_index)
+
+    # 답변 재생 중 호출어 감시(barge-in). 마이크 스트림이 필요해 TTS 생성 뒤에 붙인다.
+    barge_in = BargeInListener(stream, oww_model,
+                               threshold=cfg.barge_in_threshold,
+                               enabled=cfg.barge_in_enabled)
+    tts.barge_in = barge_in
+
+    def turn():
+        """한 턴을 실행한다. 재생 중 끼어들기로 끊겼으면 True."""
+        return run_turn(stream, vad, whisper_model, tts, oww_model,
+                        output_device_index, cfg.debug_record, barge_in)
 
     print("\n====================================================")
     print("🎙️ [최종 보이스 에이전트 가동] '알렉사'라고 부르고 대화해보세요!")
@@ -205,9 +236,11 @@ def main():
 
             score = get_score(oww_model, audio_data)
 
-            if score > 0.5:
-                run_turn(stream, vad, whisper_model, tts, oww_model,
-                         output_device_index, cfg.debug_record)
+            if score > WAKE_THRESHOLD:
+                # 답변을 끊고 들어온 턴은 대기 루프로 돌려보내지 않고 이어서 연다.
+                # (사용자가 이미 호출어를 말했으므로 다시 부르게 하면 안 된다)
+                while turn():
+                    pass
 
     except KeyboardInterrupt:
         print("\n[System] 시스템을 종료합니다.")

@@ -1,6 +1,6 @@
 import argparse
 
-from agent.tts import TextToSpeech
+from agent.text_to_speech import TextToSpeech
 
 
 def main():

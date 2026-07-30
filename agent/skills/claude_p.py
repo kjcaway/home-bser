@@ -35,15 +35,18 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
-from agent.backgroundsound import BackgroundSound
+from agent.background_sound import BackgroundSound
+from agent.barge_in_cancelled import BargeInCancelled
 from agent.config import (
     WAITING_SOUND_FILE,
     WAITING_SOUND_DELAY_SECONDS,
     WAITING_SOUND_INTERVAL_SECONDS,
     load_env_file,
 )
+from agent.wait import wait_for_completion
 
 DEFAULT_ALLOWED_TOOLS = "WebSearch,WebFetch"
 DEFAULT_TIMEOUT = 60.0
@@ -221,28 +224,64 @@ def build_command() -> list:
     return cmd
 
 
-def ask(question: str) -> str:
+def ask(question: str, cancel_event=None) -> str:
     """claude CLI 에 질문을 보내고 TTS 로 읽을 수 있게 정리된 답변을 반환합니다.
 
     실행 실패/오류 응답은 예외를 올리므로, 호출자가 처리해야 합니다.
     (subprocess.TimeoutExpired 는 그대로 전달되어 호출자가 따로 안내할 수 있다.)
+
+    cancel_event(threading.Event)를 주면 응답을 기다리는 동안 set 되는 즉시 claude
+    프로세스를 죽이고 BargeInCancelled 를 올립니다 — 사용자가 호출어로 끼어들었을 때
+    웹 검색이 계속 돌지 않게 하기 위함입니다.
     """
     timeout = float(os.environ.get("CLAUDE_CLI_TIMEOUT", DEFAULT_TIMEOUT))
+    cmd = build_command()
 
-    proc = subprocess.run(
-        build_command(),
-        input=question,
-        capture_output=True,
+    # subprocess.run 대신 Popen + 워커 스레드를 쓰는 이유: run() 은 끝날 때까지
+    # 블로킹이라 그 사이 들어온 취소 신호를 볼 방법이 없다. communicate() 를 짧은
+    # timeout 으로 반복 호출하는 우회도 불가능하다 — 입력을 보낸 뒤의 두 번째 호출은
+    # ValueError("Cannot send input after starting communication") 로 막혀 있다.
+    # 그래서 파이프 통신은 워커에 통째로 맡기고, 이 스레드는 감시만 한다.
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
         cwd=WORK_DIR,
     )
+    done = threading.Event()
+    result = {}
+
+    def communicate():
+        try:
+            result["stdout"], result["stderr"] = proc.communicate(input=question)
+        except Exception as e:
+            result["error"] = e
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=communicate, daemon=True)
+    worker.start()
+
+    outcome = wait_for_completion(done, cancel_event, deadline=time.monotonic() + timeout)
+    if outcome != "done":
+        # 끼어들기든 시간 초과든 자식 프로세스를 확실히 정리한다. subprocess.run 이
+        # 타임아웃 때 하던 일을 여기서 직접 하는 것이다(kill 후 파이프 회수까지 대기).
+        proc.kill()
+        worker.join()
+        if outcome == "cancelled":
+            raise BargeInCancelled()
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    if "error" in result:
+        raise result["error"]
 
     if proc.returncode != 0:
-        stderr = proc.stderr.strip()
+        stderr = (result.get("stderr") or "").strip()
         raise RuntimeError(f"claude 비정상 종료 (exit {proc.returncode}): {stderr[:300]}")
 
-    stdout = proc.stdout.strip()
+    stdout = (result.get("stdout") or "").strip()
     if not stdout:
         return ""
 
@@ -307,23 +346,48 @@ def handle(user_text: str, tts) -> bool:
     )
     waiting.start()
 
+    # 웹 검색까지 도는 질의는 대기가 수십 초까지 갈 수 있으므로, 그 동안에도 호출어를
+    # 감시해 사용자가 질문을 바꿀 수 있게 한다. 재생 중 끼어들기와 **같은** 리스너를
+    # 쓰므로 감지되면 stop_event 가 서고, 그것을 cancel_event 로 받은 ask() 가
+    # claude 프로세스를 죽인다. 리스너가 없으면(무음 모드 등) 기존처럼 끝까지 기다린다.
+    listener = getattr(tts, "barge_in", None)
+    if listener is not None:
+        listener.start()
+
+    def stop_waiting():
+        """대기음과 호출어 감시를 함께 멈춘다 (TTS 재생 전 반드시 호출).
+
+        대기음은 출력 장치를, 감시는 입력 장치를 잡고 있어 둘 다 정리해야 이어지는
+        tts.speak() 가 깨끗한 상태에서 시작한다.
+        """
+        waiting.stop()
+        if listener is not None:
+            listener.stop()
+
     start = time.monotonic()
     try:
-        answer = ask(user_text)
+        answer = ask(user_text, cancel_event=listener.stop_event if listener else None)
+    except BargeInCancelled:
+        stop_waiting()
+        print(f"[System] 사용자 끼어들기 — claude 질의를 취소했습니다 "
+              f"({time.monotonic() - start:.1f}초 대기 후).")
+        # 답변은 말하지 않는다. 턴은 처리한 것으로 보고(True) 끝내면, 호출부가
+        # 끼어들기를 감지해 곧바로 다음 명령을 받는다.
+        return True
     except subprocess.TimeoutExpired:
-        waiting.stop()
+        stop_waiting()
         print("[오류] claude CLI 응답이 제한 시간을 초과했습니다.")
         print("       .env 의 CLAUDE_CLI_TIMEOUT 을 늘리거나 CLAUDE_CLI_MODEL 을 더 빠른 모델로 바꿔보세요.")
         tts.speak(TIMEOUT_MESSAGE)
         return True
     except Exception as e:
-        waiting.stop()
+        stop_waiting()
         print(f"[오류] claude CLI 호출 실패: {e}")
         tts.speak(ERROR_MESSAGE)
         return True
     elapsed = time.monotonic() - start
 
-    waiting.stop()   # answer 를 말하기 전에 대기음을 멈추고 스트림 정리까지 대기
+    stop_waiting()   # answer 를 말하기 전에 대기음·감시를 멈추고 스트림 정리까지 대기
 
     if not answer:
         print("[오류] claude CLI 응답이 비어 있습니다.")

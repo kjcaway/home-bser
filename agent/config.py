@@ -1,9 +1,10 @@
 import argparse
 import os
 from pathlib import Path
-from typing import NamedTuple
 
 import pyaudio
+
+from agent.run_config import RunConfig
 
 # 프로젝트 루트(= venv 루트). agent/config.py 기준 한 단계 위.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,12 +37,27 @@ WAITING_SOUND_INTERVAL_SECONDS = 5.0   # 대기음을 연속 반복하지 않고
 # 고정 5초 녹음 대신, 말이 시작되면 녹음하고 일정 시간 무음이면 종료한다.
 #   - 짧은 명령은 1~2초에 즉시 반응, 긴 명령(5초 초과)도 상한까지 안 잘림
 #   - 무음이 녹음에 거의 안 들어가므로 Whisper 환각(무음 구간 상투구)도 완화
-# 종료 판정은 Silero VAD(agent/vad.py)의 프레임별 음성 확률로 한다.
+# 종료 판정은 Silero VAD(agent/silero_vad.py)의 프레임별 음성 확률로 한다.
 STT_MIN_RECORD_SECONDS = 0.5     # 최소 녹음. 순간 잡음 한 프레임으로 즉시 끊기는 것 방지
 STT_MAX_RECORD_SECONDS = 15.0    # 최대 녹음. 소음 환경에서 무한 녹음되는 것 방지(하드 상한)
 STT_SILENCE_MS = 800             # 발화 시작 후 이만큼 연속 무음이면 발화 끝으로 판정
 STT_START_TIMEOUT_SECONDS = 6.0  # 호출만 하고 이 시간 내 아무 말 없으면 조용히 취소
 VAD_THRESHOLD = 0.5              # Silero 음성 확률이 이 값 이상이면 '음성' 프레임으로 간주
+
+
+# ==========================================
+# 호출어 임계값 / 재생 중 끼어들기(barge-in)
+# ==========================================
+WAKE_THRESHOLD = 0.5   # 대기 상태에서 이 점수를 넘으면 호출어로 인정
+
+# 답변을 합성/재생하는 동안에도 호출어를 감시해, 감지되면 재생을 끊고 곧바로 다음 턴을
+# 여는 기능(agent/barge_in_listener.py). 엉뚱한 답변을 끝까지 듣고 있지 않아도 되게 하는 것이 목적.
+BARGE_IN_ENABLED = True
+
+# 재생 중에는 스피커 소리가 마이크로 되돌아오므로(에코 제거 없음) 대기 상태와 같은
+# 임계값을 쓰면 자기 답변 소리에 스스로 깨어난다. 그래서 더 높게 잡는다.
+# 잘 안 끊기면 낮추고, 혼자 깨어나면 올린다 (.env 의 BARGE_IN_THRESHOLD 로 덮어쓰기).
+BARGE_IN_THRESHOLD = 0.7
 
 # faster-whisper 모델 크기. small→medium 은 한국어 구어체 정확도를 눈에 띄게 올리고,
 # 8코어 CPU 기준 5초 발화 전사가 대략 4~6초로 대화형에 충분히 빠르다(속도<정확도 트레이드오프).
@@ -58,7 +74,7 @@ STT_MODEL_SIZE = "medium"
 #   남겨둔다 — LLM 스테이지가 추가되면 그때 별도 device 설정을 둔다.
 #
 # input_device_name / output_device_name:
-#   장치 이름의 접두사(prefix) 패턴(대소문자 무시, 일치 규칙은 audio_io.py 의
+#   장치 이름의 접두사(prefix) 패턴(대소문자 무시, 일치 규칙은 audio_device.py 의
 #   find_device_by_name 참고). PyAudio 인덱스는 USB 재연결/부팅 순서에 따라 바뀌므로
 #   운영환경은 인덱스 대신 이름으로 장치를 찾는다. 이름 끝의 ALSA '(hw:N,M)' 번호도
 #   부팅마다 바뀌므로 비교에서 제외한다. 실제 이름은
@@ -126,17 +142,39 @@ def load_env_file(path=None):
             os.environ[key] = value
 
 
-class RunConfig(NamedTuple):
-    """실행 인자 + 환경 프리셋을 해석한 결과."""
-    device: str
-    stt_compute_type: str
-    input_device_name: str | None
-    input_device_index: int | None
-    output_device_name: str | None
-    output_device_index: int | None
-    list_devices: bool
-    debug_record: bool
-    off_speaker: str | None
+# .env 값으로 인정하는 truthy/falsy 문자열 (스킬들의 *_ENABLED 와 같은 규칙)
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def _env_bool(key, default):
+    """.env/환경변수의 on/off 값을 읽는다. 비어 있거나 해석 불가면 default.
+
+    음성 턴을 죽이는 것보다 기본값으로 계속 도는 편이 낫기 때문에, 잘못된 값은
+    경고만 남기고 무시한다 (스킬들의 *_ENABLED 와 같은 태도).
+    """
+    raw = os.environ.get(key)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    print(f"[경고] {key} 값을 해석할 수 없어 기본값({default})을 씁니다: {raw!r}")
+    return default
+
+
+def _env_float(key, default):
+    """.env/환경변수의 숫자 값을 읽는다. 비어 있거나 숫자가 아니면 default."""
+    raw = os.environ.get(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[경고] {key} 값을 숫자로 읽을 수 없어 기본값({default})을 씁니다: {raw!r}")
+        return default
 
 
 def parse_device_args():
@@ -185,6 +223,9 @@ def parse_device_args():
     stt_compute_type = "float16" if device == "cuda" else "int8"
     input_device_name = os.environ.get("AUDIO_INPUT_NAME") or preset["input_device_name"]
     output_device_name = os.environ.get("AUDIO_OUTPUT_NAME") or preset["output_device_name"]
+    # 끼어들기 임계값은 마이크/스피커 배치(에코 양)에 따라 달라지므로 .env 로 덮어쓸 수 있게 한다.
+    barge_in_enabled = _env_bool("BARGE_IN_ENABLED", BARGE_IN_ENABLED)
+    barge_in_threshold = _env_float("BARGE_IN_THRESHOLD", BARGE_IN_THRESHOLD)
 
     def describe(name, index):
         if name:
@@ -203,6 +244,8 @@ def parse_device_args():
               f"마이크: {describe(input_device_name, preset['input_device_index'])}, "
               f"스피커: {describe(output_device_name, preset['output_device_index'])}, "
               f"STT compute_type: {stt_compute_type})")
+        print("[System] 재생 중 끼어들기(barge-in): "
+              + (f"켜짐 (임계값 {barge_in_threshold:.2f})" if barge_in_enabled else "꺼짐"))
 
     return RunConfig(
         device=device,
@@ -214,4 +257,6 @@ def parse_device_args():
         list_devices=args.list_devices,
         debug_record=args.debug_record,
         off_speaker=args.off_speaker,
+        barge_in_enabled=barge_in_enabled,
+        barge_in_threshold=barge_in_threshold,
     )

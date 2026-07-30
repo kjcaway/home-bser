@@ -3,7 +3,7 @@ import time
 import re
 import argparse
 
-from agent.audio_io import play_wav_file
+from agent.audio_play import play_wav_file
 from agent.config import TIMER_ALARM_FILE
 
 

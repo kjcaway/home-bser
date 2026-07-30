@@ -14,19 +14,23 @@ flowchart TD
 
     subgraph LOOP["main() 무한 루프 · 한 턴"]
         direction TB
-        WAKE{"① 호출어 감지<br/>get_score 'alexa'<br/>score &gt; 0.5 ?"}
+        WAKE{"① 호출어 감지<br/>get_score 'alexa'<br/>score &gt; WAKE_THRESHOLD (0.5) ?"}
         WAKE -->|아니오| WAKE
         WAKE -->|예| ACK["② 응답음 재생<br/>play_wav_file(res0.wav)<br/>= '듣고 있어요' 신호"]
         ACK --> FLUSH["버퍼 비우기<br/>flush_input_stream<br/>(응답음 녹음 방지)"]
         FLUSH --> REC["③ 녹음 (VAD 동적)<br/>record_until_silence<br/>+ stream.stop_stream"]
         REC --> STT["④ STT<br/>transcribe_pcm<br/>faster-whisper (한국어)"]
         STT --> EXEC["⑤ 명령 처리<br/>execute_command(user_text, tts)"]
-        EXEC --> RESET["대기 복귀<br/>start_stream + flush<br/>+ reset_wakeword_state"]
+        EXEC --> BARGE{"LLM 대기 / 답변 재생 중<br/>'알렉사' 감지?<br/>BargeInListener (0.7)"}
+        BARGE -->|"예: 질의 취소 · 재생 중단"| ACK
+        BARGE -->|아니오| RESET["대기 복귀<br/>start_stream + flush<br/>+ reset_wakeword_state"]
         RESET --> WAKE
     end
 
     EXEC -.호출.-> DISPATCH
 ```
+
+> **끼어들기(barge-in).** ⑤ 에서 **LLM 이 답을 만드는 동안**과 **답변을 읽어주는 동안** 모두 마이크가 열려 있어, "알렉사"를 부르면 진행 중이던 질의·재생이 즉시 중단되고 곧바로 ② 로 이어집니다(대기 상태로 돌아가지 않습니다 — 이미 호출어를 말했으므로 두 번 부르게 하지 않기 위함). 엉뚱한 답변을 끝까지 듣거나, 오래 걸리는 웹 검색을 마냥 기다리지 않아도 됩니다. 재생 중에는 스피커 소리가 마이크로 되돌아오므로(에코 제거 없음) 대기 상태보다 높은 임계값을 씁니다. `.env` 의 `BARGE_IN_ENABLED` / `BARGE_IN_THRESHOLD` 로 조정하며, `BARGE_IN_ENABLED=0` 이면 끝날 때까지 기다리는 기존 동작으로 돌아갑니다.
 
 ## 명령 처리 = 스킬 디스패처
 
@@ -61,17 +65,24 @@ flowchart TD
 | 단계 | 모듈 | 핵심 함수 |
 | --- | --- | --- |
 | 진입점/오케스트레이터 | `main_agent.py` | `main()`, `execute_command()` |
-| 설정·환경 프리셋 | `agent/config.py` | `parse_device_args()`, `load_env_file()` |
-| 오디오 I/O | `agent/audio_io.py` | `open_input_stream()`, `record_frames()`, `play_wav_file()`, `resolve_devices()` |
-| 호출어 감지 | `agent/wakeword.py` | `load_wakeword_model()`, `get_score()` |
+| 설정·환경 프리셋 | `agent/config.py`, `agent/run_config.py` | `parse_device_args()`, `load_env_file()`, `RunConfig` |
+| 오디오: 장치 탐색 | `agent/audio_device.py` | `resolve_devices()`, `find_device_by_name()`, `list_input_devices()` |
+| 오디오: 입력(녹음) | `agent/audio_record.py`, `agent/mic_stream.py` | `open_input_stream()`, `record_until_silence()`, `MicStream` |
+| 오디오: 출력(재생) | `agent/audio_play.py` | `play_wav_file()` |
+| 오디오: 포맷 변환 공용 | `agent/audio_format.py` | `supports_format()`, `downmix_to_mono()` |
+| 호출어 감지 | `agent/wakeword.py` | `load_wakeword_model()`, `get_score()`, `reset_wakeword_state()` |
+| 끼어들기 (barge-in) | `agent/barge_in_listener.py`, `agent/barge_in_cancelled.py`, `agent/wait.py` | `BargeInListener.start()`, `.stop()`, `.triggered`, `BargeInCancelled`, `wait_for_completion()` |
 | STT (음성→텍스트) | `agent/stt.py` | `load_stt_model()`, `transcribe_pcm()` |
-| TTS (텍스트→음성) | `agent/tts.py` | `TextToSpeech.speak()`, `SilentTextToSpeech` (무음 테스트용) |
+| VAD (발화 종료 감지) | `agent/silero_vad.py` | `SileroVAD.load()`, `.is_speech()` |
+| TTS (텍스트→음성) | `agent/text_to_speech.py`, `agent/silent_text_to_speech.py` | `TextToSpeech.speak()`, `SilentTextToSpeech` (무음 테스트용) |
 | TTS 입력 정규화 | `agent/text_norm.py` | `normalize_for_tts()`, `english_to_hangul()`, `normalize_numbers()` |
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
 | 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
 | 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
 
 > 모델(Wake Word / STT / TTS)은 import 시점이 아니라 `main()` 안에서 **한 번만** 로드됩니다. 덕분에 다른 스크립트가 `agent` 하위 모듈을 개별 import 해도 전체 파이프라인이 딸려오지 않습니다.
+
+> 파일이 잘게 나뉘어 있는 이유: **한 파일에 클래스 하나, 또는 클래스 없이 함수 여럿** 규칙을 따릅니다 (CLAUDE.md "Python 코드 규칙"). 클래스 파일의 파일명은 클래스명의 snake_case 입니다 — `agent/mic_stream.py` → `MicStream`.
 
 
 # Python venv
@@ -198,6 +209,41 @@ PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마�
 매칭은 **완전일치가 아니라 접두사(prefix) 일치**(대소문자 무시)입니다. ALSA 가 이름 끝에 붙이는 `(hw:카드,디바이스)` 번호는 서버에서 부팅할 때마다 바뀌기 때문입니다 — 같은 마이크가 `USB PnP Sound Device: Audio (hw:1,0)` 였다가 `(hw:2,0)` 이 됩니다. 그래서 비교 전에 패턴과 장치 이름 **양쪽 모두**에서 이 `(hw:N,M)` 꼬리표를 떼어냅니다. 덕분에 `.env` 에 hw 번호까지 통째로 붙여넣은 값도 매칭됩니다(접두사 일치만으로는 이 경우 패턴이 장치 이름보다 길어져 실패합니다). 접두사로 일치하는 장치가 하나도 없으면 예전 방식인 부분일치로 폴백합니다(로그에 `부분일치 폴백` 표시) — 프리셋 기본값 `"USB"` 가 `Generic USB Audio Device` 처럼 이름 중간에 오는 머신에서도 계속 동작하도록.
 
 이름 패턴은 코드 수정 없이 `.env` 로 덮어쓸 수 있습니다 (`AUDIO_INPUT_NAME`, `AUDIO_OUTPUT_NAME`; 빈 값이면 프리셋으로 폴백). 대상 머신의 실제 장치 이름은 `--list-devices` 로 확인하고, 끝의 `(hw:N,M)` 부분은 빼고 적어도 됩니다.
+
+### 끼어들기 조정 (`.env`)
+호출어 감시는 기본으로 켜져 있습니다(`agent/barge_in_listener.py`). 감시가 걸리는 구간은 두 곳입니다.
+
+| 구간 | 끼어들면 |
+| --- | --- |
+| LLM 응답 대기 (대기음이 울리는 동안) | `claude` 프로세스를 죽이거나(claude CLI) 응답을 버리고(hermes) 질의를 취소 |
+| 답변 합성·재생 | 재생을 청크 경계에서 즉시 중단 (~46ms) |
+
+어느 쪽이든 답변은 읽어주지 않고 곧바로 다음 명령을 받습니다. 시작 시 해석된 설정이 로그에 한 번 남습니다.
+
+```
+[System] 재생 중 끼어들기(barge-in): 켜짐 (임계값 0.70)
+```
+
+| 키 | 기본값 | 설명 |
+| --- | --- | --- |
+| `BARGE_IN_ENABLED` | `1` | `0` 이면 재생이 끝나야 호출어가 먹히는 기존 동작 |
+| `BARGE_IN_THRESHOLD` | `0.7` | 재생 중 호출어 임계값 (대기 상태는 `WAKE_THRESHOLD` = 0.5) |
+
+임계값을 대기 상태보다 높게 잡는 이유는 **에코 제거(AEC)가 없기** 때문입니다 — 재생 중에는 스피커로 나간 자기 답변이 마이크로 되돌아오므로, 같은 값을 쓰면 자기 목소리에 스스로 깨어납니다. 적정값은 마이크와 스피커의 거리에 따라 달라집니다.
+
+- 부르지도 않았는데 답변이 자꾸 끊긴다 → 올린다 (0.8~0.9).
+- 불러도 잘 안 끊긴다 → 낮춘다 (0.6). 너무 낮추면 위 증상이 나타납니다.
+
+값을 못 읽으면(오타 등) 경고만 남기고 기본값으로 계속 돕니다. `.env` 한 줄 때문에 음성 턴이 죽지 않도록 하기 위함입니다. 끼어들기가 걸리면 로그에 남습니다.
+
+```
+✋ [끼어들기] 호출어 감지 (score 0.83) — 재생을 멈춥니다.
+[System] 사용자 끼어들기 — claude 질의를 취소했습니다 (4.2초 대기 후).
+```
+
+> **hermes 는 요청 자체가 취소되지는 않습니다.** OpenAI SDK 의 블로킹 호출은 밖에서 끊을 수단이 없어, 요청은 백그라운드에 남겨두고 결과만 버립니다. 로컬(127.0.0.1) 호출에 `max_tokens=256` 이라 버려진 요청도 몇 초 안에 스스로 끝납니다. 반면 claude CLI 는 자식 프로세스라 실제로 종료시켜, 취소 후에도 웹 검색이 계속 도는 일이 없습니다.
+>
+> **타이머 알람**은 별도 프로세스라 끊기지 않지만, 알람이 울릴 때는 메인 루프가 대기 상태라 호출어가 원래대로 동작합니다.
 
 ### 진단 (오디오 품질 / 응답 지연)
 녹음이 끝나고 "🛑 녹음 완료!" 이후 응답이 오래 걸리거나 인식 결과가 엉뚱할 때, 원인이 **오디오 품질**인지 **STT 속도**인지 구분하는 것이 먼저입니다. 메인 루프는 매 턴 아래 계측을 로그로 남깁니다.

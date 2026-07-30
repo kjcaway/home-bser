@@ -1,6 +1,6 @@
 import threading
 
-from agent.audio_io import play_wav_file
+from agent.audio_play import play_wav_file
 
 
 class BackgroundSound:

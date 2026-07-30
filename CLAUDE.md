@@ -8,6 +8,37 @@ An offline-first, local Korean voice assistant ("home agent") intended to run on
 
 Note: the repo root **is itself the Python venv** (`bin/`, `include/`, `lib/`, `pyvenv.cfg` are venv artifacts, git-ignored). Source lives directly at the root alongside them.
 
+## Python 코드 규칙 (one class per file)
+
+A `.py` file is **either** a class module **or** a function module — never a mix of both:
+
+- **Class module** — exactly **one** top-level `class`, and **no** top-level functions. The filename is that class name in `snake_case`: `agent/mic_stream.py` → `MicStream`, `agent/barge_in_listener.py` → `BargeInListener`, `agent/silent_text_to_speech.py` → `SilentTextToSpeech`.
+- **Function module** — any number of top-level functions, and **no** `class` at all. The filename names the job, not a type: `agent/audio_record.py`, `agent/text_norm.py`, `agent/wait.py`.
+
+Module docstrings, imports, and module-level constants are fine in both. The rule is about **top-level** `class` statements only — methods, nested classes, and closures inside a function are unaffected.
+
+**There is no exemption for "small" or "not really a" classes.** An exception (`BargeInCancelled`) and a `NamedTuple` (`RunConfig`) each get their own file too, even at ~10 lines. A rule that admits "this one is just a data holder" is a rule that needs a judgement call at every commit, and that judgement is exactly what lets a module drift back into a grab bag of one class plus fifteen functions.
+
+Three consequences worth knowing **before** writing new code, because each one is a place where the obvious move breaks the rule:
+
+- **A class's factory function becomes a `@classmethod`, not a module function.** `load_vad()` sitting next to `SileroVAD` violates the rule, and exiling it to another module hides where the object gets made. `SileroVAD.load()` keeps the loader with its class and the file compliant.
+- **A helper shared by two class modules needs a third, lower module.** `MicStream` (capture) and `play_wav_file` (playback) both need `supports_format()` / `downmix_to_mono()`. They live in `agent/audio_format.py`, a leaf that imports no other audio module — putting them in either caller would make the two import each other.
+- **Splitting a function module is a cohesion judgement, not this rule.** The rule never forces a function module to split. `agent/audio_io.py` was split into `audio_device` / `audio_record` / `audio_play` because it had grown three unrelated jobs, not because it was long.
+
+Check compliance mechanically (no judgement, no grep guessing):
+
+```bash
+./bin/python - <<'PY'
+import ast, pathlib
+for f in sorted(pathlib.Path(".").glob("*.py")) + sorted(pathlib.Path("agent").rglob("*.py")):
+    top = ast.parse(f.read_text(encoding="utf-8")).body
+    cls = [n.name for n in top if isinstance(n, ast.ClassDef)]
+    fns = [n.name for n in top if isinstance(n, ast.FunctionDef)]
+    if len(cls) > 1 or (cls and fns):
+        print(f"위반 {f}: class={cls} func={fns}")
+PY
+```
+
 ## Commands
 
 All commands must run inside the venv (the repo root). Activate first:
@@ -29,7 +60,7 @@ python main_agent.py --off-speaker "오늘 날씨는 어때?"   # 마이크/스�
 
 `--off-speaker "<문장>"` runs **one turn from text** and exits: it skips the wake word, the mic, STT, and TTS playback, feeding the sentence straight to `execute_command()` and printing the reply. Handled in `main()` before device resolution, so no PyAudio device is opened and neither whisper nor VITS is loaded — it starts instantly and works on a machine with no audio hardware (CI, SSH). Use it to test skill routing and LLM answers without talking to the mic. An empty string is rejected with a usage hint.
 
-`SilentTextToSpeech` (`agent/tts.py`) is the stand-in passed to the skills: same `speak()` / `output_device_index` interface, but it prints `🔇 [무음 응답] …` instead of synthesizing. It also carries a `silent = True` marker, because two paths make sound **without going through `tts.speak()`** and must be suppressed explicitly:
+`SilentTextToSpeech` (`agent/silent_text_to_speech.py`) is the stand-in passed to the skills: same `speak()` / `output_device_index` interface, but it prints `🔇 [무음 응답] …` instead of synthesizing. It also carries a `silent = True` marker, because two paths make sound **without going through `tts.speak()`** and must be suppressed explicitly:
 
 - `timer` skill — the alarm plays in a `timer.py` subprocess, so `run_timer_script(…, silent=True)` logs what it would have run and skips the spawn.
 - `claude_p` / `hermes_api` skills — the waiting sound plays via `BackgroundSound`, so they pass `enabled=not tts.silent`; `BackgroundSound.start()` then becomes a no-op while the `start()`/`stop()` pairing in the skill stays unchanged.
@@ -47,7 +78,7 @@ STT/TTS both run on CPU in every environment: CPU was judged the better fit for 
 
 ### Device selection (why by name, not index)
 
-PortAudio assigns device indices in enumeration order, so a USB mic/speaker's index **changes across reboots and re-plugs** — a hardcoded `2` breaks. Presets therefore carry `input_device_name` / `output_device_name`: a case-insensitive **prefix** of the device name, resolved to a live index at startup by `resolve_devices()` in `agent/audio_io.py` (called once in `main()`, before models load).
+PortAudio assigns device indices in enumeration order, so a USB mic/speaker's index **changes across reboots and re-plugs** — a hardcoded `2` breaks. Presets therefore carry `input_device_name` / `output_device_name`: a case-insensitive **prefix** of the device name, resolved to a live index at startup by `resolve_devices()` in `agent/audio_device.py` (called once in `main()`, before models load).
 
 - No name (dev) → the preset's `input_device_index` / `output_device_index` is used as-is.
 - Name matches → that index is used, and the match is logged (with which rule matched). Multiple matches → the first is picked and the rest are logged.
@@ -89,36 +120,47 @@ torch(예: cuDNN 9.20 = `torch.backends.cudnn.version()` → `92000`)보다 새 
 
 ## Architecture
 
-The code is split into an `agent/` package with one module per pipeline stage; `main_agent.py` only wires them together:
+The code is split into an `agent/` package with one module per pipeline stage — subdivided further by the one-class-per-file rule above, so a stage that has both a class and functions occupies two files; `main_agent.py` only wires them together:
 
-- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` / `--list-devices` / `--debug-record` / `--off-speaker` argparse logic, returns a `RunConfig` NamedTuple), and `load_env_file()` (reads the git-ignored `.env` into `os.environ`).
-- `agent/audio_io.py` — PyAudio helpers: `open_input_stream(device_index=None)`, `MicStream`, `list_input_devices()`, `list_output_devices()`, `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()` (name → index 해석), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False)` (`stop_event` set 시 청크 경계에서 즉시 중단, `loop`=반복 재생), `save_pcm_wav(path, pcm_bytes, rate, channels)` (16-bit PCM → wav, `--debug-record` 진단용), `_convert_pcm16()` / `_downmix_to_mono()` (다채널→모노 다운믹스 공용), `_supports_format(audio, device_index, channels, rate, fmt, kind)` (입/출력 공용, 오픈 전 레이트 지원 조회로 ALSA 경고 회피), `list_input_devices()` / `list_output_devices()` 는 공용 `_list_devices(audio, kind)` 위임.
-- `agent/backgroundsound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes / claude CLI 스킬에서 사용). `enabled=False` 면 `start()` 가 no-op (무음 모드용). `play_wav_file` 을 `audio_io` 에서 가져다 쓰는 단방향 의존.
-- `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`.
-- `agent/vad.py` — Silero VAD (발화 종료 감지/endpointing). `load_vad()` / `load_vad_model()` (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `SileroVAD.is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), `WINDOW_SAMPLES`.
+- `agent/config.py` — audio constants (`CHUNK`, `RATE`, …), output-file names (`TTS_OUTPUT_FILE`, `WAKE_RESPONSE_FILE`, `WAITING_SOUND_FILE`), the waiting-sound threshold (`WAITING_SOUND_DELAY_SECONDS`), the wake-word thresholds (`WAKE_THRESHOLD`, `BARGE_IN_ENABLED` / `BARGE_IN_THRESHOLD`), the `ENVIRONMENTS` preset dict, `parse_device_args()` (the `--environment` / `--list-devices` / `--debug-record` / `--off-speaker` argparse logic, returns a `RunConfig`), `load_env_file()` (reads the git-ignored `.env` into `os.environ`), and its `_env_bool()` / `_env_float()` readers (empty or unparseable value → warn and keep the default, so a bad `.env` line can't kill a voice turn).
+- `agent/run_config.py` — `RunConfig` NamedTuple: 실행 인자 + 환경 프리셋을 해석한 결과 (`device`, `stt_compute_type`, 장치 이름/인덱스, `list_devices`, `debug_record`, `off_speaker`, `barge_in_*`). 만드는 쪽은 `config.parse_device_args()` — 값 객체만 따로 두는 이유는 위의 코드 규칙(클래스 파일 하나에 클래스 하나) 때문이다.
+- `agent/audio_format.py` — 입력/출력이 공통으로 쓰는 포맷 헬퍼 두 개: `supports_format(audio, device_index, channels, rate, fmt, kind)` (오픈 전 레이트 지원 조회로 ALSA 경고 회피), `downmix_to_mono(samples, channels)`. 오디오 모듈 중 아무 것도 import 하지 않는 **잎(leaf)** — `mic_stream` 과 `audio_play` 양쪽이 여기에 기대므로, 어느 한쪽에 두면 순환 import 가 된다.
+- `agent/mic_stream.py` — `MicStream` class: 장치가 16kHz/모노를 거부하면 네이티브 레이트로 열어 `read()` 마다 16kHz 모노로 변환하는 래퍼 (아래 "Microphone capture" 참고). PyAudio 스트림과 같은 `read` / `start_stream` / `stop_stream` / `close` / `get_read_available` 인터페이스.
+- `agent/audio_device.py` — 장치 이름 → 인덱스 해석 전용: `find_device_by_name()` / `resolve_device_index()` / `resolve_devices()`, `list_input_devices()` / `list_output_devices()` (공용 `_list_devices(audio, kind)` 위임), `_normalize_device_name()`.
+- `agent/audio_record.py` — 마이크 입력 경로: `open_input_stream(device_index=None)` (→ `MicStream`, 실패 시 입력 장치 목록 출력), `record_until_silence()` (VAD 동적 녹음, 현재 파이프라인용), `flush_input_stream()`, `save_pcm_wav(path, pcm_bytes, rate, channels)` (16-bit PCM → wav, `--debug-record` 진단용).
+- `agent/audio_play.py` — 재생 경로: `play_wav_file(file_path, output_device_index=None, stop_event=None, loop=False)` (`stop_event` set 시 청크 경계에서 즉시 중단, `loop`=반복 재생)과 그 소프트웨어 변환 헬퍼 `_convert_pcm16()`.
+- `agent/background_sound.py` — `BackgroundSound` class: 지연 임계값 후 wav 를 백그라운드 스레드에서 반복 재생하고 `stop()` 으로 멈추는 헬퍼 (대기음용, hermes / claude CLI 스킬에서 사용). `enabled=False` 면 `start()` 가 no-op (무음 모드용). `play_wav_file` 을 `audio_play` 에서 가져다 쓰는 단방향 의존.
+- `agent/barge_in_listener.py` — `BargeInListener` class: 답변을 만들고 들려주는 동안 마이크를 다시 열어 별도 스레드에서 호출어를 감시하고, 감지되면 `stop_event` 를 세우는 헬퍼. `reset()` / `start()` / `stop()` / `triggered`. `audio_record` 의 `flush_input_stream` 과 `wakeword` 의 `get_score` / `reset_wakeword_state` 를 가져다 쓰는 단방향 의존 (아래 "Barge-in" 참고).
+- `agent/barge_in_cancelled.py` — `BargeInCancelled` 예외: 기다리던 작업을 끼어들기로 취소했음을 알린다. LLM 스킬의 `ask()` 가 올리고 `handle()` 이 받는다.
+- `agent/wait.py` — `wait_for_completion(done_event, cancel_event, deadline)`: LLM 대기 구간처럼 밖에서 끊을 수 없는 블로킹 호출을 워커 스레드에 맡기고 감시해 `"done"` / `"cancelled"` / `"timeout"` 을 반환한다 (뒤처리는 호출자 몫 — 아래 "Barge-in" 참고).
+- `agent/wakeword.py` — `load_wakeword_model()` (openwakeword built-ins, "alexa"), `get_score()`, `reset_wakeword_state()` (특징 버퍼에 무음을 흘려 넣어 직전 호출어의 잔상을 지운 뒤 `Model.reset()`).
+- `agent/silero_vad.py` — `SileroVAD` class (발화 종료 감지/endpointing): `SileroVAD.load()` 팩토리 (pip `silero-vad`, jit 모델 번들 → **오프라인** 로드), `is_speech()` / `speech_prob()` (512 샘플=32ms 고정 창), 모듈 상수 `WINDOW_SAMPLES`. 로더가 모듈 함수(`load_vad()`)가 아니라 `@classmethod` 인 이유는 위의 코드 규칙 때문이다.
 - `agent/stt.py` — `load_stt_model()` (faster-whisper, model size from `STT_MODEL_SIZE` in `config.py`, currently `medium`), `transcribe_pcm()` (int16 PCM bytes → Korean text).
-- `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play). 합성 직전 `normalize_for_tts()` 로 텍스트를 정규화한다. Also `SilentTextToSpeech` — 모델 로드 없이 답변을 출력만 하는 `--off-speaker` 전용 대역 (`silent = True` 표식); 정규화 결과가 원문과 다르면 `🔡 [읽기]` 줄로 함께 출력한다.
+- `agent/text_to_speech.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play). 합성 직전 `normalize_for_tts()` 로 텍스트를 정규화한다. `barge_in` 속성(`BargeInListener`, 기본 `None`)이 붙어 있으면 `speak()` 가 합성·재생 구간을 그 리스너로 감싼다.
+- `agent/silent_text_to_speech.py` — `SilentTextToSpeech` class: 모델 로드 없이 답변을 출력만 하는 `--off-speaker` 전용 대역 (`silent = True` 표식); 정규화 결과가 원문과 다르면 `🔡 [읽기]` 줄로 함께 출력한다.
 - `agent/text_norm.py` — TTS 입력 정규화. `normalize_for_tts()` (기호 → 영문 → 숫자 순), `normalize_english()` / `english_to_hangul()` (영문 → 한글 음차), `normalize_numbers()` (숫자 → 한자어 읽기, 소수·자릿수 쉼표 포함), `normalize_symbols()`. 모델을 로드하지 않으므로 `python -m agent.text_norm "문장"` 으로 단독 실행해 발음을 미리 볼 수 있다. 아래 "Text normalization" 참고.
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
-  - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask()`, `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
-  - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask()`, `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (hermes gateway)" 참고).
+  - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask(question, cancel_event=None)` (`Popen` + 워커 스레드, 취소 시 프로세스 kill), `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
+  - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask(question, cancel_event=None)` (워커 스레드, 취소 시 결과 폐기), `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (hermes gateway)" 참고).
 
 Models are loaded once inside `main()` (not at import time), so other scripts can import individual `agent` modules without pulling in the whole pipeline. Skills load no models themselves — `handle(user_text, tts)` receives the `TextToSpeech` instance from the caller.
 
 `main_agent.py` runs an infinite loop:
 
-1. **Wake word** — score each mic chunk; > 0.5 on "alexa" triggers a turn.
+1. **Wake word** — score each mic chunk; a score above `WAKE_THRESHOLD` (0.5) on "alexa" triggers a turn.
 2. **Wake acknowledgment** — plays `res0.wav` (`WAKE_RESPONSE_FILE`) so the user knows the agent is listening, then starts recording.
 3. **STT** — records **dynamically** with VAD endpointing (`record_until_silence()`, see below) instead of a fixed window, then transcribes with faster-whisper (Korean). If no speech was detected (user triggered the wake word but said nothing), the turn is skipped silently.
-4. **Intent + action** — `process_user_command()` (see below).
-5. Calls `oww_model.reset()` after each turn to clear wake-word state.
+4. **Intent + action** — `execute_command()` (see below). The mic is stopped for the STT/LLM part of this step and reopened only while an answer is spoken (see "Barge-in").
+5. Calls `reset_wakeword_state()` after each turn to clear wake-word state.
+
+`run_turn()` returns **whether the answer was cut off by a barge-in**, and the loop is `while turn(): pass` — an interrupted turn opens the next one immediately instead of returning to the wake-word wait, because the user has already said "알렉사" and must not be made to say it twice.
 
 ### Microphone capture (sample-rate handling)
 
 The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assume 16 kHz). Most raw hardware ALSA devices (`hw:*`) do **not** support 16 kHz directly (PyAudio would fail with `-9997 Invalid sample rate`, and `-9999` on other mismatches). `open_input_stream()` therefore returns a `MicStream` wrapper instead of a bare PyAudio stream:
 
-1. It resolves the target device to a concrete index (default input device if none given), then **probes** whether that device supports 16 kHz / mono via `_supports_format(…, "input")` (`PyAudio.is_format_supported`) — sound-server devices (`pulse`, `default`, `sysdefault`) support this via their own conversion. Only if supported does it actually open at 16 kHz / mono.
+1. It resolves the target device to a concrete index (default input device if none given), then **probes** whether that device supports 16 kHz / mono via `supports_format(…, "input")` (`agent/audio_format.py`, wrapping `PyAudio.is_format_supported`) — sound-server devices (`pulse`, `default`, `sysdefault`) support this via their own conversion. Only if supported does it actually open at 16 kHz / mono.
 2. If the probe says unsupported, it opens the device at its **native** sample rate and channel count (e.g. USB-C Speaker = 48000 Hz stereo) and, on every `read()`, downmixes to mono and resamples to 16 kHz in software via `scipy.signal.resample_poly`. This path logs `[System] 마이크 네이티브 …Hz/…ch → 16000Hz/모노 소프트웨어 변환 사용` at startup.
 
 **Why probe first, not try-then-catch:** an earlier version simply called `open()` at 16 kHz and caught the `OSError`. That works, but `Pa_OpenStream` reaches the ALSA stream-configure path before failing, and PortAudio prints C-level `paInvalidSampleRate` / `PaAlsaStream_Configure … failed` warnings **directly to stderr** — which Python's `try/except` cannot suppress. `Pa_IsFormatSupported` is a lighter hw-params probe that does not enter that path, so the unsupported case is detected silently and no failed-open warning is emitted.
@@ -127,7 +169,7 @@ The pipeline needs 16 kHz mono int16 (openwakeword and faster-whisper both assum
 
 ### Speech capture (VAD endpointing)
 
-The turn no longer records a fixed 5 s window. `record_until_silence()` (in `agent/audio_io.py`) records **until the user stops speaking**, using Silero VAD (`agent/vad.py`) to score each frame. This makes short commands respond in ~1–2 s and lets long commands run past the old 5 s cap without being cut off; because near-silence isn't captured, it also curbs Whisper's silence-region hallucinations. State machine (params in `agent/config.py`):
+The turn no longer records a fixed 5 s window. `record_until_silence()` (in `agent/audio_record.py`) records **until the user stops speaking**, using Silero VAD (`agent/silero_vad.py`) to score each frame. This makes short commands respond in ~1–2 s and lets long commands run past the old 5 s cap without being cut off; because near-silence isn't captured, it also curbs Whisper's silence-region hallucinations. State machine (params in `agent/config.py`):
 
 - Before speech starts: if no speech is seen within `STT_START_TIMEOUT_SECONDS` (6 s), returns `b''` → `main_agent.py` skips the turn silently ("호출만 하고 말 없음").
 - After speech starts: `STT_SILENCE_MS` (800 ms) of continuous silence ends the utterance — but not before `STT_MIN_RECORD_SECONDS` (0.5 s) total, so a single noise blip can't end it instantly.
@@ -136,16 +178,45 @@ The turn no longer records a fixed 5 s window. `record_until_silence()` (in `age
 
 **512-sample framing:** Silero at 16 kHz requires exactly 512-sample (32 ms) windows, which isn't a divisor of `CHUNK` (1280). `record_until_silence()` therefore buffers samples across reads and feeds the VAD in 512-sample slices, carrying the remainder to the next read. `SileroVAD.reset()` clears the model's recurrent state at the start of each utterance so the previous turn doesn't leak into the next.
 
-**Offline:** `torch.hub` would download the model from GitHub; the pip `silero-vad` package bundles the jit model, so `load_vad()` loads with no network — the offline property holds. `torch` is already a dependency (TTS/STT), so the only new package is `silero-vad`.
+**Offline:** `torch.hub` would download the model from GitHub; the pip `silero-vad` package bundles the jit model, so `SileroVAD.load()` loads with no network — the offline property holds. `torch` is already a dependency (TTS/STT), so the only new package is `silero-vad`.
 
 ### Playback (sample-rate handling)
 
 Playback has the mirror-image problem: the wav files (`res0.wav`, the TTS `response.wav`, the timer alarm, the hermes `waiting.wav`) are all 16 kHz, but raw hardware output devices reject that rate. `play_wav_file()` handles it the same way, and — like the mic path — **probes before opening** to avoid PortAudio's stderr ALSA warnings (see "Why probe first" above; these warnings surfaced every turn because playback runs each turn, whereas the mic opens once at startup):
 
-1. It resolves the target device to a concrete index (default output device if none given), then probes whether that device supports the wav's own rate / channel count via `_supports_format(…, "output")` (`PyAudio.is_format_supported`). If supported, it opens at the wav's rate directly.
+1. It resolves the target device to a concrete index (default output device if none given), then probes whether that device supports the wav's own rate / channel count via `supports_format(…, "output")` (the same `agent/audio_format.py` helper the mic path uses). If supported, it opens at the wav's rate directly.
 2. If unsupported, it opens at the output device's **native** rate / channels and converts the 16-bit PCM in software via `_convert_pcm16()` — mono downmix → `scipy.signal.resample_poly` → duplicate up to the target channel count. This path logs `[System] 재생 네이티브 변환: …Hz/…ch → …Hz/…ch`.
 
 `_convert_pcm16()` only handles 16-bit PCM (all wavs in this repo are 16-bit); a non-16-bit file that the device can't open natively is skipped with a message rather than crashing. `play_wav_file()` also accepts an optional `output_device_index` (defaults to the system default output device).
+
+### Barge-in (interrupting an answer)
+
+The mic is stopped for most of a turn (`stream.stop_stream()` right after recording) so speaker output isn't re-recorded into the wake word. The cost of that was that **a turn could not be interrupted** — a wrong answer had to be listened to in full, and a slow LLM had to be waited out. `agent/barge_in_listener.py` reopens the mic for the two windows where it matters: **the LLM wait** and **the answer playback**.
+
+One `BargeInListener` (created in `main()`, hung on `tts.barge_in`) serves both. It starts the stream, scores each chunk on a background thread, and on a hit sets `stop_event`. What that event does depends on who is waiting on it:
+
+| Window | Started by | `stop_event` does |
+| --- | --- | --- |
+| LLM 응답 대기 | `claude_p.handle()` / `hermes_api.handle()` | `ask(cancel_event=…)` 가 보고 `BargeInCancelled` 를 올린다 (claude 는 프로세스 kill) |
+| 답변 합성·재생 | `TextToSpeech.speak()` | `play_wav_file()` 이 청크 경계에서 보고 재생을 멈춘다 (~46 ms) |
+
+`stop()` joins the thread and stops the stream again, leaving the rest of the turn exactly as it was. Both windows are opt-in via `getattr(tts, "barge_in", None)`, so `SilentTextToSpeech` (`--off-speaker`) and any other TTS object keep working untouched.
+
+- **Synthesis is inside the window, not just playback.** VITS synthesis takes seconds; a barge-in during it skips playback entirely (`if not listener.triggered` before `play_wav_file`) rather than starting an answer the user already interrupted.
+- **`triggered` persists for the whole turn.** A skill that calls `speak()` twice would otherwise play its second sentence over the user's next command; the second call logs `✋ 끼어들기 이후이므로…` and returns. `run_turn()` clears the flag with `reset()` at the start of each turn.
+- **The mic is opened per window, not for the whole turn.** It stays off through recording-to-STT and is reopened by whoever owns the next window; each `start()` re-flushes. Leaving it running across a window it isn't being read in would make the listener chew through audio buffered seconds earlier, so detection would lag real time by the length of the backlog.
+- **`reset_wakeword_state()` on `start()` is required, not defensive.** openwakeword's feature buffer still holds the "알렉사" that opened this turn; without flushing it the listener re-detects that same utterance on its first chunk and cancels the answer instantly.
+
+**Why a separate, higher threshold (`BARGE_IN_THRESHOLD` = 0.7 vs `WAKE_THRESHOLD` = 0.5):** there is no acoustic echo cancellation, so during playback the mic hears the agent's own voice. At the idle threshold the agent wakes itself up on its own answer. The right value depends on how close the mic and speaker sit, so both it and the on/off switch are `.env`-overridable (`BARGE_IN_ENABLED`, `BARGE_IN_THRESHOLD`) and are read through `_env_bool()` / `_env_float()`; the resolved values are logged once at startup (`[System] 재생 중 끼어들기(barge-in): 켜짐 (임계값 0.70)`). Raise it if the agent interrupts itself, lower it if calling it doesn't take. `BARGE_IN_ENABLED=0` restores the old listen-to-the-end behavior.
+
+**Cancelling the LLM wait.** Both skills wrap `ask()` the same way the waiting sound is wrapped: start the listener, pass `listener.stop_event` in as `cancel_event`, and stop both through one local `stop_waiting()` helper that must run **before** any `tts.speak()` (the waiting sound holds the output device, the listener holds the input device). On `BargeInCancelled` the skill speaks nothing and returns `True` — the turn is consumed, and `run_turn()` sees `triggered` and opens the next one.
+
+The blocking call itself is cancelled differently in each skill, because only one of them can be killed:
+
+- **`claude_p`** — `subprocess.run` became `Popen` + a worker thread doing `communicate()`, with `wait_for_completion()` watching for done / cancelled / timeout. Polling `communicate(timeout=…)` in a loop is *not* an option: after input has been sent, a second call raises `ValueError("Cannot send input after starting communication")`. On cancel or timeout the process is killed and the worker joined — the same cleanup `subprocess.run` did on timeout, and it matters here because an abandoned `claude` keeps running web searches. `TimeoutExpired` is still raised on timeout, so the existing handler is unchanged.
+- **`hermes_api`** — the OpenAI SDK call has no cancel handle, so it runs in a **daemon worker whose result is discarded** on barge-in; the request itself keeps going until hermes finishes it. Switching to `stream=True` would allow closing the connection for a real cancel, but that changes the request shape and would need verifying against the gateway; a local (127.0.0.1) request capped at `max_tokens=256` finishes on its own in a few seconds, so abandoning it was the cheaper trade. The skill's own timeout still comes from the SDK client (`HERMES_TIMEOUT`), which is why `wait_for_completion()` is called without a `deadline` there.
+
+**Still not covered: the timer alarm.** It plays from a `timer.py` subprocess, which nothing here holds a handle to. It rings while the main loop is idle, though, so the wake word already works normally during it.
 
 ### Diagnostics (slow / wrong STT)
 
@@ -191,7 +262,9 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 
 `HERMES_ENABLED` is the explicit **on/off switch**, evaluated in `is_enabled()`: a truthy value (`1`/`true`/`yes`/`on`) turns the skill on (it still needs `HERMES_API_KEY`, since the OpenAI SDK requires the field even though hermes itself needs no auth), and a falsy value (`0`/`false`/`no`/`off`) turns it off. When off, `is_enabled()` returns `False` so `handle()` exits immediately — the hermes-calling code (the `BackgroundSound` waiting sound and `ask()`) never runs — and the echo fallback handles the turn. For backward compatibility, if `HERMES_ENABLED` is **unset**, the switch falls back to `HERMES_API_KEY` presence (the original behavior). An unrecognized `HERMES_ENABLED` value is treated as off (with a warning). With no `.env` the skill returns `False` and the echo fallback runs — so **dev works unchanged without a hermes server**, and prod enables the LLM by dropping in a `.env`. If the call fails or returns an empty body, the skill speaks a short apology and returns `True` (an echo would be confusing for what was clearly a question).
 
-**Waiting sound (응답 지연 안내):** the hermes call is a blocking HTTP request that can take several seconds. To signal "still working, not stuck", `handle()` wraps `ask()` with a `BackgroundSound` (`agent/backgroundsound.py`) that loops `WAITING_SOUND_FILE` (`soundfile/waiting.wav`) on a background thread. Two behaviors matter: (1) it only starts after a `WAITING_SOUND_DELAY_SECONDS` (0.8 s) threshold, so replies faster than that get **no** sound and are not interrupted; (2) `stop()` is called **before** `tts.speak()` on every path (success, empty, exception) and joins the playback thread, so the waiting loop's output stream is fully closed before TTS opens the same device — no two-streams-on-one-device conflict. Because the mic is already stopped during command processing (`main_agent.py`), the waiting sound is never recorded and can't re-trigger the wake word. If `waiting.wav` is missing or playback fails, the thread swallows the error and the LLM turn proceeds normally.
+**Waiting sound (응답 지연 안내):** the hermes call is a blocking HTTP request that can take several seconds. To signal "still working, not stuck", `handle()` wraps `ask()` with a `BackgroundSound` (`agent/background_sound.py`) that loops `WAITING_SOUND_FILE` (`soundfile/waiting.wav`) on a background thread. Two behaviors matter: (1) it only starts after a `WAITING_SOUND_DELAY_SECONDS` (0.8 s) threshold, so replies faster than that get **no** sound and are not interrupted; (2) `stop()` is called **before** `tts.speak()` on every path (success, empty, exception) and joins the playback thread, so the waiting loop's output stream is fully closed before TTS opens the same device — no two-streams-on-one-device conflict. If `waiting.wav` is missing or playback fails, the thread swallows the error and the LLM turn proceeds normally.
+
+The mic is **open** during this window (that is what makes the wait interruptible — see "Barge-in"), so the waiting sound is heard by the wake-word listener. It is a short chime played once every `WAITING_SOUND_INTERVAL_SECONDS` rather than a continuous loop, so it is far less likely to false-trigger than the TTS answer, and the same raised `BARGE_IN_THRESHOLD` covers it. The pairing to keep intact is that the skill's `stop_waiting()` stops **both** the sound and the listener before speaking.
 
 ### LLM stage (Claude Code CLI)
 
@@ -221,7 +294,7 @@ claude --print --output-format json [--model …] [--effort …] --append-system
   It also asks for **번역 and 음차 separately**: "translate English" alone leaves `Python` and `GPU` untouched, because proper nouns and acronyms are not things to translate — they need transliterating (파이썬, 지피유). That distinction is what the TTS model requires; see "Text normalization".
 - **`cwd` is a temp dir** (`WORK_DIR = tempfile.gettempdir()`), not the project root. Running `claude` inside this repo would load this very `CLAUDE.md` as project context, contaminating answers to ordinary questions ("서울 수도 어디야") with repo instructions.
 - **Failure paths all return `True`** (never fall through to the echo, which would be confusing for a question): a timeout speaks `TIMEOUT_MESSAGE`, any other failure or an empty answer speaks `ERROR_MESSAGE`. The one exception is a **missing `claude` binary** (`shutil.which`), which returns `False` so the turn degrades to hermes/echo; the warning prints once (`_warned_missing`) instead of every turn.
-- **Waiting sound** — identical contract to the hermes section above (delay threshold, `stop()` before `tts.speak()` on every path). It matters more here: a web-search turn can run well past hermes' latency.
+- **Waiting sound + barge-in** — identical contract to the hermes section above (delay threshold, `stop_waiting()` before `tts.speak()` on every path). Both matter more here: a web-search turn can run well past hermes' latency, so it is the window most worth being able to interrupt — and unlike hermes, the cancel actually **kills** the `claude` process rather than abandoning it (see "Barge-in").
 
 Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFFORT`, `CLAUDE_CLI_TIMEOUT` (default 60 s), `CLAUDE_CLI_ALLOWED_TOOLS`.
 
@@ -229,7 +302,7 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFF
 
 ### TTS single source
 
-`agent/tts.py` (`TextToSpeech`) is the only TTS implementation; `timer.py` and `text_to_wav.py` import it.
+`agent/text_to_speech.py` (`TextToSpeech`) is the only TTS implementation; `text_to_wav.py` imports it, and `timer.py` shares its playback path (`agent/audio_play.py`).
 
 ### Text normalization (why English and digits need rewriting)
 
@@ -277,7 +350,7 @@ Both LLM skills' system prompts also ask for Hangul transliteration (see the two
 
 - `README.md` — venv + pip setup.
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
-- `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns).
+- `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns, barge-in switch/threshold).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
 - `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model, `--effort` to set thinking depth).
 

@@ -29,16 +29,18 @@ from agent.config import (
     STT_START_TIMEOUT_SECONDS,
     parse_device_args,
 )
-from agent.audio_io import (
-    open_input_stream,
-    record_until_silence,
-    flush_input_stream,
+from agent.audio_device import (
     list_input_devices,
     list_output_devices,
     resolve_devices,
 )
+from agent.audio_record import (
+    open_input_stream,
+    record_until_silence,
+    flush_input_stream,
+)
 from agent.stt import load_stt_model, transcribe_pcm
-from agent.vad import load_vad
+from agent.silero_vad import SileroVAD
 
 
 def char_error_rate(reference, hypothesis):
@@ -91,7 +93,7 @@ def main():
     # ==========================================
     print("[System] STT 모델을 불러오는 중입니다...")
     whisper_model = load_stt_model(cfg.device, cfg.stt_compute_type)
-    vad = load_vad()   # 실제 에이전트와 동일한 발화 종료 감지(endpointing)
+    vad = SileroVAD.load()   # 실제 에이전트와 동일한 발화 종료 감지(endpointing)
     print("[System] STT 모델 로드 완료!")
 
     # ==========================================

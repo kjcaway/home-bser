@@ -29,15 +29,18 @@ hermes 가 없는 개발환경(dev)에서는 .env 를 두지 않으면 되고, �
 
 import os
 import re
+import threading
 import time
 
-from agent.backgroundsound import BackgroundSound
+from agent.background_sound import BackgroundSound
+from agent.barge_in_cancelled import BargeInCancelled
 from agent.config import (
     WAITING_SOUND_FILE,
     WAITING_SOUND_DELAY_SECONDS,
     WAITING_SOUND_INTERVAL_SECONDS,
     load_env_file,
 )
+from agent.wait import wait_for_completion
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8642/v1"
 DEFAULT_MODEL = "qwen3:8b"
@@ -120,24 +123,54 @@ def _get_client():
     return _client
 
 
-def ask(question: str) -> str:
+def ask(question: str, cancel_event=None) -> str:
     """hermes 에 질문을 보내고 <think> 블록이 제거된 답변 문자열을 반환합니다.
 
     호출 실패 시 예외를 그대로 올리므로, 호출자가 처리해야 합니다.
+
+    cancel_event(threading.Event)를 주면 응답을 기다리는 동안 set 되는 즉시
+    BargeInCancelled 를 올립니다(사용자가 호출어로 끼어든 경우).
+
+    claude 스킬과 달리 **요청 자체는 취소되지 않는다.** OpenAI SDK 의 블로킹 호출은
+    밖에서 끊을 수단이 없어, 호출을 데몬 워커 스레드에 남겨두고 결과만 버린다.
+    스트리밍(`stream=True`)으로 바꾸면 연결을 닫아 진짜로 끊을 수 있지만, 그러면
+    요청 형태가 달라져 hermes 게이트웨이 쪽 동작까지 같이 검증해야 한다. 여기서는
+    요청을 그대로 두는 쪽을 골랐다 — hermes 는 로컬(127.0.0.1)이고 max_tokens 가
+    256 이라 버려진 요청도 몇 초 안에 스스로 끝나기 때문이다.
     """
     client = _get_client()
     model = os.environ.get("HERMES_MODEL", DEFAULT_MODEL)
+    done = threading.Event()
+    result = {}
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": question},
-        ],
-        max_tokens=256,
-        temperature=0.7,
-    )
-    return strip_think(response.choices[0].message.content or "")
+    def call():
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": question},
+                ],
+                max_tokens=256,
+                temperature=0.7,
+            )
+            result["text"] = strip_think(response.choices[0].message.content or "")
+        except Exception as e:
+            result["error"] = e
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+
+    # 제한 시간은 SDK 클라이언트가 이미 갖고 있으므로(HERMES_TIMEOUT) 여기서는
+    # 끼어들기만 감시한다 — 응답이 없으면 워커가 그 타임아웃으로 예외를 물고 끝난다.
+    if wait_for_completion(done, cancel_event) == "cancelled":
+        raise BargeInCancelled()
+
+    if "error" in result:
+        raise result["error"]
+    return result.get("text", "")
 
 
 # ==========================================
@@ -170,18 +203,42 @@ def handle(user_text: str, tts) -> bool:
     )
     waiting.start()
 
+    # 응답을 기다리는 동안에도 호출어를 감시해 사용자가 질문을 바꿀 수 있게 한다.
+    # 재생 중 끼어들기와 같은 리스너이며, 감지되면 stop_event 가 서고 그것을
+    # cancel_event 로 받은 ask() 가 BargeInCancelled 를 올린다.
+    listener = getattr(tts, "barge_in", None)
+    if listener is not None:
+        listener.start()
+
+    def stop_waiting():
+        """대기음과 호출어 감시를 함께 멈춘다 (TTS 재생 전 반드시 호출).
+
+        대기음은 출력 장치를, 감시는 입력 장치를 잡고 있어 둘 다 정리해야 이어지는
+        tts.speak() 가 깨끗한 상태에서 시작한다.
+        """
+        waiting.stop()
+        if listener is not None:
+            listener.stop()
+
     start = time.monotonic()
     try:
-        answer = ask(user_text)
+        answer = ask(user_text, cancel_event=listener.stop_event if listener else None)
+    except BargeInCancelled:
+        stop_waiting()
+        print(f"[System] 사용자 끼어들기 — hermes 응답을 버립니다 "
+              f"({time.monotonic() - start:.1f}초 대기 후).")
+        # 답변은 말하지 않는다. 턴은 처리한 것으로 보고(True) 끝내면, 호출부가
+        # 끼어들기를 감지해 곧바로 다음 명령을 받는다.
+        return True
     except Exception as e:
-        waiting.stop()
+        stop_waiting()
         print(f"[오류] hermes API 호출 실패: {e}")
         print("       hermes gateway 가 실행 중인지, .env 의 HERMES_BASE_URL 이 맞는지 확인하세요.")
         tts.speak(ERROR_MESSAGE)
         return True
     elapsed = time.monotonic() - start
 
-    waiting.stop()   # answer 를 말하기 전에 대기음을 멈추고 스트림 정리까지 대기
+    stop_waiting()   # answer 를 말하기 전에 대기음·감시를 멈추고 스트림 정리까지 대기
 
     # 모델이 <think> 블록만 뱉고 본문이 비는 경우가 있어 방어한다.
     if not answer:
