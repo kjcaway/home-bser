@@ -13,10 +13,17 @@
 - `--append-system-prompt` 로 음성 비서용 짧은 한국어 응답 지침을 덧붙입니다.
   (끄려면 `--system-prompt ""`)
 
+모델/생각 깊이(`--model` / `--effort`)는 스킬(`agent/skills/claude_p.py`)과 **같은 해석
+규칙**을 씁니다. 별칭 표를 여기에 복사해두면 스킬 쪽과 조용히 어긋나서, 정작 두 백엔드를
+같은 조건으로 비교하려고 만든 이 스크립트가 다른 모델을 재보게 됩니다. 그래서
+`resolve_model()` 과 `EFFORT_LEVELS` 를 스킬에서 그대로 가져다 씁니다
+(`test_hermes_api.py` 가 `hermes_api` 의 스위치 상수를 가져다 쓰는 것과 같은 이유).
+
 사용 예:
     python test-claude-cli.py                              # 기본 질문으로 테스트
     python test-claude-cli.py "서울의 수도는 어디야?"          # 질문 직접 지정
-    python test-claude-cli.py --model sonnet                # 모델 지정 (opus/sonnet/haiku/전체 이름)
+    python test-claude-cli.py --model sonnet                # 모델 지정 (별칭은 전체 이름으로 펴서 전달)
+    python test-claude-cli.py --effort low                  # 생각 깊이 지정 (low/medium/high/xhigh/max)
     python test-claude-cli.py --output-format text          # 원문 텍스트만 출력
     python test-claude-cli.py --with-tools "이 저장소 구조 알려줘"  # 도구 사용 허용
     echo "질문" | python test-claude-cli.py -               # 질문을 파이프로 전달
@@ -28,6 +35,8 @@ import shutil
 import subprocess
 import sys
 import time
+
+from agent.skills.claude_p import EFFORT_LEVELS, resolve_model
 
 DEFAULT_QUESTION = "안녕하세요. 자기소개를 한 문장으로 해주세요."
 DEFAULT_TIMEOUT = 120.0
@@ -45,8 +54,14 @@ def build_command(args) -> list:
     """`claude -p ...` 명령줄을 조립합니다."""
     cmd = ["claude", "--print", "--output-format", args.output_format]
 
+    # 별칭이 들어와도 스킬과 같은 규칙으로 전체 모델 이름으로 펴서 넘긴다.
+    # 별칭 그대로 넘기면 CLI 버전에 따라 다른 모델이 답할 수 있어, 비교 결과를
+    # 어느 모델에 귀속시켜야 할지 알 수 없게 된다.
     if args.model:
-        cmd += ["--model", args.model]
+        cmd += ["--model", resolve_model(args.model)]
+
+    if args.effort:
+        cmd += ["--effort", args.effort]
 
     # 기본 시스템 프롬프트는 살려두고(출력 형식 등 CLI 자체 규칙이 담겨 있음)
     # 응답 스타일 지침만 덧붙인다. 빈 문자열이면 생략.
@@ -100,7 +115,13 @@ def main():
     parser.add_argument("question", nargs="?", default=DEFAULT_QUESTION,
                         help=f"질문 문장. '-' 이면 표준입력에서 읽습니다 (기본값: {DEFAULT_QUESTION!r})")
     parser.add_argument("--model", default=None,
-                        help="모델 별칭(opus/sonnet/haiku) 또는 전체 이름 (기본값: CLI 설정값)")
+                        help="전체 모델 이름(claude-sonnet-5 등) 또는 별칭(opus/sonnet/haiku/fable). "
+                             "별칭은 전체 이름으로 펴서 전달합니다 (기본값: CLI 설정값)")
+    # 설정 파일이 아니라 사람이 직접 치는 플래그이므로, 스킬처럼 경고 후 무시하지 않고
+    # argparse 가 즉시 거절하게 한다. 오타를 무시하면 엉뚱한 effort 의 측정치를
+    # 맞는 값인 줄 알고 비교하게 된다. 값 목록은 스킬과 같은 상수를 쓴다.
+    parser.add_argument("--effort", choices=EFFORT_LEVELS, default=None,
+                        help="생각 깊이. 낮을수록 빠르고 쌉니다 (기본값: CLI 설정값)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                         help=f"응답 대기 제한 시간(초) (기본값: {DEFAULT_TIMEOUT})")
     parser.add_argument("--output-format", choices=["json", "text"], default="json",
@@ -126,8 +147,12 @@ def main():
         sys.exit(1)
 
     cmd = build_command(args)
+    # 별칭이 아니라 **실제로 넘어간** 모델 이름을 찍는다. 통계와 함께 남는 값이라
+    # 나중에 어떤 모델의 측정치인지 되짚을 수 있어야 한다.
     print(f"[System] claude CLI: {shutil.which('claude')} "
-          f"(model: {args.model or '기본값'}, tools: {'on' if args.with_tools else 'off'})")
+          f"(model: {resolve_model(args.model) if args.model else '기본값'}, "
+          f"effort: {args.effort or '기본값'}, "
+          f"tools: {'on' if args.with_tools else 'off'})")
     if args.show_command:
         print(f"[System] 실행 명령: {' '.join(cmd)} < (stdin)")
     print(f"[질문] {question}")
@@ -140,7 +165,7 @@ def main():
                               text=True, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         print(f"[오류] {args.timeout}초 안에 응답이 오지 않아 중단했습니다.")
-        print("       --timeout 을 늘리거나 --model 을 더 빠른 모델로 바꿔보세요.")
+        print("       --timeout 을 늘리거나, --model 을 더 빠른 모델로 / --effort 를 더 낮게 바꿔보세요.")
         sys.exit(1)
     except OSError as e:
         print(f"[오류] claude 실행 실패: {e}")

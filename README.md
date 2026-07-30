@@ -151,8 +151,11 @@ python main_agent.py --off-speaker "대한민국의 수도는 어디야?"
 
 - 둘 다 켜면 `claude_p` 가 먼저 시도되고, 꺼져 있거나 `claude` 명령이 없으면 hermes 로 넘어갑니다.
 - `CLAUDE_CLI_ENABLED` 는 **미설정 시 꺼짐**입니다 (claude CLI 는 API 키가 필요 없어, 설치만으로 켜지면 모든 발화가 조용히 클라우드로 나가기 때문).
-- 그 외 키: `CLAUDE_CLI_MODEL`(opus/sonnet/haiku, 비우면 CLI 기본값), `CLAUDE_CLI_TIMEOUT`(기본 60초), `CLAUDE_CLI_ALLOWED_TOOLS`(기본 `WebSearch,WebFetch`, 비우면 도구 없이 응답).
-- 연결 확인은 `python test-claude-cli.py "질문"` / `python test_hermes_api.py "질문"` 으로 각각 할 수 있습니다.
+- 그 외 키: `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFFORT`, `CLAUDE_CLI_TIMEOUT`(기본 60초), `CLAUDE_CLI_ALLOWED_TOOLS`(기본 `WebSearch,WebFetch`, 비우면 도구 없이 응답).
+  - `CLAUDE_CLI_MODEL` — 전체 모델 이름(`claude-sonnet-5`, `claude-opus-5`, `claude-haiku-4-5`, `claude-fable-5`) 권장. 별칭(`sonnet`/`opus`/`haiku`/`fable`)도 받지만 별칭은 "그 계열의 최신 모델"이라 CLI 버전이 오르면 가리키는 모델이 조용히 바뀌므로, 스킬이 아는 별칭은 실행 시 전체 이름으로 펴서 넘깁니다(모르는 값은 그대로 통과). 비우면 CLI 기본값.
+  - `CLAUDE_CLI_EFFORT` — 생각 깊이(`low`/`medium`/`high`/`xhigh`/`max`). 낮을수록 빠르고 쌉니다. 음성 응답은 지연이 바로 체감되므로 `low`~`medium` 이 무난합니다. 비우면 CLI 기본값, 인식할 수 없는 값은 경고 후 무시.
+  - 실행 시 해석된 모델/effort 는 프로세스당 한 번 로그로 남습니다: `[System] claude CLI 모델: … / effort: …`
+- 연결 확인은 `python test-claude-cli.py "질문"` / `python test_hermes_api.py "질문"` 으로 각각 할 수 있습니다. `test-claude-cli.py` 는 `--model` / `--effort` 로 위 두 키와 같은 값을 시험해볼 수 있고(별칭 해석 규칙도 스킬과 동일), `--show-command` 로 실제 실행되는 `claude` 명령줄을 확인할 수 있습니다.
 
 ### 장치 선택 (인덱스가 아니라 이름으로)
 PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마이크/스피커의 인덱스는 **재부팅·재연결 때마다 바뀝니다** (하드코딩한 `2` 는 깨짐). 그래서 `prod` 프리셋은 인덱스 대신 이름 패턴(`input_device_name` / `output_device_name`)을 들고 있고, 시작 시 `resolve_devices()` 가 이를 실제 인덱스로 해석합니다.

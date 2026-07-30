@@ -97,7 +97,7 @@ The code is split into an `agent/` package with one module per pipeline stage; `
 - `agent/tts.py` — `TextToSpeech` class (`facebook/mms-tts-kor` VITS via `transformers` + `torch`); `synthesize_to_file()` and `speak()` (synthesize + play). Also `SilentTextToSpeech` — 모델 로드 없이 답변을 출력만 하는 `--off-speaker` 전용 대역 (`silent = True` 표식).
 - `agent/skills/` — one module per skill, each exposing `handle(user_text, tts) -> bool`:
   - `agent/skills/timer.py` — `check_timer_intent()`, `extract_time_unit()`, `format_time_korean()`, `run_timer_script()`.
-  - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `build_command()`, `ask()`, `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
+  - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask()`, `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
   - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask()`, `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 (아래 "LLM stage (hermes gateway)" 참고).
 
 Models are loaded once inside `main()` (not at import time), so other scripts can import individual `agent` modules without pulling in the whole pipeline. Skills load no models themselves — `handle(user_text, tts)` receives the `TextToSpeech` instance from the caller.
@@ -194,10 +194,16 @@ Config comes from a **git-ignored `.env`** in the project root — copy `.env.ex
 `agent/skills/claude_p.py` answers an unclaimed utterance by shelling out to the locally installed **Claude Code CLI** in non-interactive mode and speaking the reply. The command it builds (`build_command()`):
 
 ```
-claude --print --output-format json [--model …] --append-system-prompt "…" --allowedTools "WebSearch,WebFetch"
+claude --print --output-format json [--model …] [--effort …] --append-system-prompt "…" --allowedTools "WebSearch,WebFetch"
 ```
 
 - **Question via stdin, not argv** — `subprocess.run(cmd, input=question)`. Same reason as `test-claude-cli.py`: a sentence starting with `-` would be read as a CLI option, and a long prompt can hit argv length limits.
+- **`--model` is always passed as a full model name** (`CLAUDE_CLI_MODEL`, empty = flag omitted = CLI default). The CLI accepts aliases (`opus`, `sonnet`, `haiku`, `fable`) too, but an alias means "the latest model in that family" — so a CLI upgrade silently swaps the model underneath, changing answer quality, latency, and cost with no config edit and nothing in the log to explain it. `resolve_model()` therefore expands the aliases in `MODEL_ALIASES` (`sonnet` → `claude-sonnet-5`, `opus` → `claude-opus-5`, `haiku` → `claude-haiku-4-5`, `fable` → `claude-fable-5`) before the flag is built; matching is case-insensitive.
+
+  **Unknown values pass through unchanged, deliberately.** A model released after this table exists (`claude-opus-6`, a new alias) then works via `.env` alone with no skill edit — the cost of that is that a typo also reaches the CLI, where it fails loudly rather than silently picking a different model.
+- **`--effort`** (`CLAUDE_CLI_EFFORT`) sets how much the model thinks: `low` / `medium` / `high` / `xhigh` / `max`. Lower is faster and cheaper; for a spoken reply the latency is felt immediately, so `low`–`medium` is the useful range and `.env.example` ships `medium`. An empty value omits the flag (CLI default). An unrecognized value is **warned once and ignored** rather than failing the turn (`resolve_effort()`, `_warned_effort`) — the same degrade-don't-crash posture as the other keys here.
+
+  The resolved model and effort are printed once per process (`[System] claude CLI 모델: … / effort: …`, guarded by `_logged_options`), not per turn: they're needed to interpret a slow or low-quality answer, but they don't change between turns.
 - **`--output-format json`** so `is_error` / `result` can be read explicitly. If the JSON can't be parsed (format change), the raw stdout is spoken instead of failing the turn. `ask()` also logs the payload's `num_turns`, which is the cheapest signal for whether tools ran: `1` = the model answered directly, `≥2` = it called a tool and answered from the result. A web-dependent question that keeps logging `1` means tools are off or being denied.
 - **`--allowedTools "WebSearch,WebFetch"`** (overridable via `CLAUDE_CLI_ALLOWED_TOOLS`). This is the point of the skill — hermes' local `qwen3:8b` can't answer anything current.
 
@@ -211,7 +217,7 @@ claude --print --output-format json [--model …] --append-system-prompt "…" -
 - **Failure paths all return `True`** (never fall through to the echo, which would be confusing for a question): a timeout speaks `TIMEOUT_MESSAGE`, any other failure or an empty answer speaks `ERROR_MESSAGE`. The one exception is a **missing `claude` binary** (`shutil.which`), which returns `False` so the turn degrades to hermes/echo; the warning prints once (`_warned_missing`) instead of every turn.
 - **Waiting sound** — identical contract to the hermes section above (delay threshold, `stop()` before `tts.speak()` on every path). It matters more here: a web-search turn can run well past hermes' latency.
 
-Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_TIMEOUT` (default 60 s), `CLAUDE_CLI_ALLOWED_TOOLS`.
+Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFFORT`, `CLAUDE_CLI_TIMEOUT` (default 60 s), `CLAUDE_CLI_ALLOWED_TOOLS`.
 
 `CLAUDE_CLI_ENABLED` is **explicit opt-in — unset means off**, unlike `HERMES_ENABLED`'s backward-compatible key-presence fallback. The claude CLI needs no API key, so "installed ⇒ enabled" would silently route every dev utterance to the cloud. Only `1`/`true`/`yes`/`on` turns it on; anything else (including an unrecognized value, which warns) is off.
 
@@ -236,4 +242,8 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_TIM
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
 - `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
-- `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model).
+- `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model, `--effort` to set thinking depth).
+
+  It **imports `resolve_model()` and `EFFORT_LEVELS` from `agent/skills/claude_p.py`** rather than restating them (the same reason `test_hermes_api.py` imports `hermes_api`'s switch constants): a second copy of the alias table drifts from the skill's, and then the script built to compare the two backends is quietly measuring a different model than the agent runs. `--model sonnet` therefore expands to `claude-sonnet-5` here too, and the startup line logs the **resolved** name so a saved measurement can be traced back to a model.
+
+  One deliberate difference: an unrecognized `--effort` is rejected by `argparse` instead of the skill's warn-and-ignore. The skill reads a config file and must degrade rather than kill a voice turn; this is a flag a human typed, and silently ignoring `--effort xhgih` would report a timing for the CLI default while labelling it otherwise.

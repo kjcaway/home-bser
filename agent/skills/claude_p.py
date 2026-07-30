@@ -19,7 +19,8 @@ hermes(로컬 LLM)가 알 수 없는 최신 정보도 답할 수 있는 것이 �
 설정은 프로젝트 루트의 `.env` 파일에서 읽습니다 (`.env.example` 참고):
 
     CLAUDE_CLI_ENABLED=1
-    CLAUDE_CLI_MODEL=sonnet
+    CLAUDE_CLI_MODEL=claude-sonnet-5
+    CLAUDE_CLI_EFFORT=medium
     CLAUDE_CLI_TIMEOUT=60
     CLAUDE_CLI_ALLOWED_TOOLS=WebSearch,WebFetch
 
@@ -47,6 +48,23 @@ from agent.config import (
 DEFAULT_ALLOWED_TOOLS = "WebSearch,WebFetch"
 DEFAULT_TIMEOUT = 60.0
 
+# 모델 별칭 → 전체 모델 ID.
+#
+# claude CLI 의 --model 은 별칭('opus', 'sonnet' …)과 전체 이름('claude-opus-5')을
+# 모두 받지만, 별칭은 "그 계열의 최신 모델"이라는 뜻이라 CLI 버전이 올라가면 조용히
+# 다른 모델로 바뀐다. 음성 응답 품질/지연/비용이 설정을 건드리지 않았는데 달라지는
+# 셈이라, 별칭이 들어오면 여기서 전체 이름으로 펴서 넘긴다.
+MODEL_ALIASES = {
+    "fable": "claude-fable-5",
+    "opus": "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+}
+
+# --effort 가 받는 값. 낮을수록 빠르고 싸며, 높을수록 오래 생각한다.
+# 음성 비서는 응답 지연이 바로 체감되므로 낮은 쪽이 기본에 가깝다.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 # 응답은 TTS 로 읽히므로 짧은 한국어 평문을 요구한다. (hermes 스킬과 동일한 지침)
 # CLI 자체 규칙이 담긴 기본 시스템 프롬프트는 살려두고 --append-system-prompt 로 덧붙인다.
 SYSTEM_PROMPT = (
@@ -72,6 +90,10 @@ WORK_DIR = tempfile.gettempdir()
 
 # claude 명령을 못 찾았다는 경고를 매 턴 반복 출력하지 않기 위한 플래그
 _warned_missing = False
+
+# 모델/effort 관련 로그도 매 턴 반복하지 않도록 한 번만 출력한다.
+_logged_options = False
+_warned_effort = False
 
 
 def is_enabled() -> bool:
@@ -99,6 +121,37 @@ def is_enabled() -> bool:
     return False
 
 
+def resolve_model(raw: str) -> str:
+    """`.env` 의 모델 값을 claude CLI 에 넘길 **전체 모델 이름**으로 편다.
+
+    - 별칭(`opus`/`sonnet`/`haiku`/`fable`) → 대응하는 전체 ID (`claude-opus-5` …)
+    - 그 외(이미 전체 이름이거나 모르는 별칭) → 그대로 통과
+
+    별칭을 그대로 넘겨도 CLI 는 동작하지만, 별칭이 가리키는 모델은 CLI 버전에 따라
+    바뀐다. 전체 이름으로 고정해야 운영환경에서 어떤 모델이 답했는지가 확정된다.
+    모르는 값을 막지 않고 통과시키는 이유는, 이 표보다 새 모델이 먼저 나오는 경우
+    (`claude-opus-6` 같은) 스킬 수정 없이 `.env` 만으로 쓸 수 있어야 하기 때문이다.
+    """
+    return MODEL_ALIASES.get(raw.strip().lower(), raw.strip())
+
+
+def resolve_effort(raw: str) -> str:
+    """`.env` 의 effort 값을 검증한다. 유효하지 않으면 빈 문자열(= 옵션 생략)."""
+    global _warned_effort
+
+    normalized = raw.strip().lower()
+    if not normalized:
+        return ""
+    if normalized in EFFORT_LEVELS:
+        return normalized
+
+    if not _warned_effort:
+        _warned_effort = True
+        print(f"[경고] CLAUDE_CLI_EFFORT 값을 해석할 수 없어 무시합니다: {raw!r}")
+        print(f"       사용 가능한 값: {', '.join(EFFORT_LEVELS)}")
+    return ""
+
+
 def strip_markdown(text: str) -> str:
     """TTS 로 읽으면 곤란한 마크다운/URL 표기를 제거한다.
 
@@ -116,12 +169,29 @@ def strip_markdown(text: str) -> str:
 
 def build_command() -> list:
     """`claude --print ...` 명령줄을 조립합니다."""
+    global _logged_options
+
     # json 형식은 오류 여부(is_error)와 소요 시간까지 함께 주므로 진단에 유리하다.
     cmd = ["claude", "--print", "--output-format", "json"]
 
-    model = os.environ.get("CLAUDE_CLI_MODEL")
+    # 별칭이 들어와도 전체 모델 이름으로 펴서 넘긴다 (resolve_model 주석 참고).
+    model = resolve_model(os.environ.get("CLAUDE_CLI_MODEL", ""))
     if model:
         cmd += ["--model", model]
+
+    # 생각 깊이. 비우면 옵션을 빼고 CLI 기본값을 따른다.
+    effort = resolve_effort(os.environ.get("CLAUDE_CLI_EFFORT", ""))
+    if effort:
+        cmd += ["--effort", effort]
+
+    # 어떤 모델/effort 로 돌고 있는지는 응답 품질·지연을 해석할 때 필요하므로 남긴다.
+    # 매 턴 같은 줄을 반복하지 않도록 첫 호출에서만 출력한다.
+    if not _logged_options:
+        _logged_options = True
+        print(
+            f"[System] claude CLI 모델: {model or 'CLI 기본값'} / "
+            f"effort: {effort or 'CLI 기본값'}"
+        )
 
     if SYSTEM_PROMPT:
         cmd += ["--append-system-prompt", SYSTEM_PROMPT]
