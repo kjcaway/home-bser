@@ -2,11 +2,13 @@
 
     ./bin/python -m batch.url_briefing                              # batch/.env 의 URL
     ./bin/python -m batch.url_briefing --url https://example.com    # URL 직접 지정
+    ./bin/python -m batch.url_briefing --name "클리앙 모두의공원"      # 링크 라벨 지정
     ./bin/python -m batch.url_briefing --stdout                     # 파일 대신 표준출력
     ./bin/python -m batch.url_briefing --output out.md              # 저장 경로 직접 지정
     ./bin/python -m batch.url_briefing --no-notify                  # 저장만, Discord 전송 생략
 
-대상 URL 은 `batch/.env` 의 `URL_BRIEFING_URL`, 저장 위치는 `BRIEFING_OUTPUT_DIR`
+대상 URL 은 `batch/.env` 의 `URL_BRIEFING_URL`, 보고서에 표시할 사이트 이름은
+`URL_BRIEFING_NAME`(비우면 호스트명), 저장 위치는 `BRIEFING_OUTPUT_DIR`
 (기본 `batch/output/`)에서 읽는다. 결과 파일명은 `url-YYYY-MM-DD.md` 이고, 같은 날 다시
 돌리면 **덮어쓴다** (`daily_briefing` 의 `YYYY-MM-DD.md` 와 접두어로만 갈린다 — 두 잡이
 같은 디렉터리를 쓰면서 겹치지 않는 이유가 이 접두어다).
@@ -28,6 +30,7 @@
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,7 +41,7 @@ from urllib.parse import urlparse
 
 from agent.skills.claude_p import DEFAULT_ALLOWED_TOOLS, is_enabled
 from batch import claude_query, discord_notify
-from batch.config import load_batch_env, output_dir, read_url
+from batch.config import load_batch_env, output_dir, read_site_name, read_url
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -55,18 +58,36 @@ REQUIRED_TOOL = "WebFetch"
 # 커뮤니티 페이지 훑기용 시스템 프롬프트. `claude_query.SYSTEM_PROMPT`(주제 요약용)
 # 대신 `ask(system_prompt=...)` 로 넘긴다.
 #
-# **분량(개요 150자 + 항목 6개 × 180자)은 취향이 아니라 Discord 예산에서 역산한 값이고,
-# 그 역산은 "실행 한 번에 URL 하나"를 전제로 한다.** 결과 문서는 저장 직후 Discord 메시지
-# 본문으로 전송되는데(batch/discord_notify.py), 본문 상한이 2000자다:
-#     2000 − 머리말(제목·생성 정보·대상 URL) ~200 − 잘림 표시 9 = 본문에 쓸 수 있는 1791자
-#     개요 150자 + 항목 6개 × 183자("- " 와 줄바꿈 포함) ≈ 1248자
-# 지시를 43% 초과해 써도 잘리지 않는다. 이 여유가 프롬프트 순응도에 대한 유일한 보험이라
-# 더 조이지 않고, URL 이 하나뿐이라 예산을 나눠 쓸 상대가 없으니 더 늘리지도 않는다
-# (`daily_briefing` 과 같은 계산이며, 머리말에 대상 URL 한 줄이 더 들어가 항목당 20자가
-# 짧다).
+# 항목의 글 제목은 **Discord 마스크 링크**(`[__"제목"__](<주소>)`)로 감싼다. 형식이 셋 다
+# 이유가 있다:
 #
-# 항목당 180자는 URL 을 금지해야 지켜지는 값이기도 하다. 커뮤니티 게시글 주소는 쿼리
-# 문자열이 붙어 100자를 넘기 일쑤라, 여섯 개면 항목 서너 개 분량을 통째로 먹는다.
+# - `[제목](<주소>)` — Discord 는 웹훅/봇이 보낸 메시지의 content 안에서 마스크 링크를
+#   렌더링한다(사용자가 직접 친 메시지에서는 안 되는 것과 다르다). 긴 주소를 그대로
+#   노출하지 않고 제목만 눌러 원문으로 갈 수 있다.
+# - `<` `>` — 주소를 부등호로 감싸면 **임베드 미리보기가 억제**된다. 감싸지 않으면 링크
+#   여섯 개마다 미리보기 카드가 붙어 메시지가 채널을 덮는다.
+# - `__…__` — Discord 에서 밑줄. 링크는 이미 파란색으로 렌더되지만 밑줄이 있는 편이
+#   눈에 띈다는 실사용 확인에 따른 것이다. 표준 마크다운에서 `__` 는 볼드라, 저장된
+#   `.md` 파일에서는 볼드로 보인다 — 파일과 알림의 겉모습이 갈리는 것은 감수한 값이다.
+#
+# **분량(개요 150자 + 항목 6개 × 설명 80자)은 취향이 아니라 Discord 예산에서 역산한
+# 값이고, 그 역산은 "실행 한 번에 URL 하나"를 전제로 한다.** 결과 문서는 저장 직후
+# Discord 메시지 본문으로 전송되는데(batch/discord_notify.py), 본문 상한이 2000자다:
+#     2000 − 머리말(제목·생성 시각·대상 링크) ~118 − 잘림 표시 9 = 본문에 쓸 수 있는 1873자
+#     개요 152자 + 항목 6개 × 191자 ≈ 1298자 → 문서 전체 ~1415자 (여유 585자 = 41%)
+#     항목 191자 = "- " 2 + 링크 문법 13 + 제목 25 + 주소 70 + 설명 80 + 줄바꿈 1
+#
+# **길이 상한은 화면에 보이는 글자가 아니라 전송되는 원문 기준이라, 주소를 마스킹해도
+# 예산은 줄지 않는다.** 오히려 문법 13자가 더 붙어 생짜 주소보다 길다 — 링크는 보기 편해
+# 지는 대가로 예산을 쓰는 기능이지, 아끼는 기능이 아니다. 링크를 넣으면서 설명이 180자
+# → 80자로 짧아진 것이 그 대가다. 대신 설명이 길 이유도 줄었다: 궁금하면 눌러서 원문을
+# 보면 된다.
+#
+# 제목과 주소는 길이를 지시할 수 없는(페이지가 정하는) 값이라 평균치로 잡았다. 최악
+# 조건(제목 40자 · 주소 90자 · 긴 사이트 이름)에서도 문서는 1634자로 상한 안에 들어온다.
+#
+# 설명 안에 생짜 주소를 금지하는 이유도 같은 예산이다. 커뮤니티 게시글 주소는 쿼리
+# 문자열이 붙어 100자를 넘기 일쑤라, 링크 밖에 또 적으면 항목 하나가 통째로 날아간다.
 #
 # 이 지시는 모델이 지켜 줄 때만 유효한 '최선 노력'이다. 실제로 지켜지는지는
 # `warn_if_too_long()` 이 매 실행마다 로그로 알려준다.
@@ -78,10 +99,15 @@ SYSTEM_PROMPT = (
     "페이지를 열지 못했다면 열지 못했다고 그대로 쓰세요. 기억이나 추측으로 채우지 마세요. "
     "먼저 이 커뮤니티에서 지금 무엇이 주로 오가고 분위기가 어떤지를 공백 포함 150자 이내로 "
     "한두 문장 쓰세요. "
-    "그 뒤에 빈 줄을 하나 넣고, '-' 로 시작하는 항목을 정확히 6개 쓰고, 각 항목은 공백 포함 180자 "
-    "이내로 쓰세요. 화제가 큰 것부터 적으세요. "
-    "각 항목에는 무슨 이야기인지와 사람들의 반응(호응·반박·논쟁 등)을 함께 적고, "
-    "글 제목을 인용할 때는 큰따옴표로 감싸세요. URL 은 쓰지 마세요. "
+    "그 뒤에 빈 줄을 하나 넣고, '-' 로 시작하는 항목을 정확히 6개 쓰세요. "
+    "화제가 큰 것부터 적으세요.\n"
+    "각 항목은 아래 형식을 그대로 지키세요.\n"
+    '- [__"글 제목"__](<글 주소>) 설명\n'
+    "글 주소는 반드시 부등호 < > 로 감싸세요. 감싸지 않으면 링크 미리보기가 붙습니다. "
+    "글 주소는 페이지에서 실제로 확인한 것만 쓰고, 지어내지 마세요. 주소가 확실하지 "
+    '않으면 링크 없이 __"글 제목"__ 만 쓰세요. '
+    "설명은 공백 포함 80자 이내로, 무슨 이야기인지와 사람들의 반응(호응·반박·논쟁 등)을 "
+    "적으세요. 설명 안에는 주소를 쓰지 마세요. "
     "제목(#)은 넣지 마세요. 상위 문서가 제목과 대상 URL 을 붙입니다. "
     "인사말·서론·맺음말 없이 개요와 항목만 출력하세요."
 )
@@ -93,6 +119,10 @@ def parse_args():
     parser.add_argument(
         "--url", metavar="주소",
         help="요약할 사이트 주소. 주면 batch/.env 의 URL_BRIEFING_URL 대신 이 값을 쓴다.")
+    parser.add_argument(
+        "--name", metavar="이름",
+        help="보고서에서 대상 링크에 표시할 사이트 이름 (기본: batch/.env 의 "
+             "URL_BRIEFING_NAME, 그것도 없으면 호스트명)")
     parser.add_argument(
         "--output", metavar="경로",
         help="결과를 저장할 파일 경로 (기본: <BRIEFING_OUTPUT_DIR>/url-YYYY-MM-DD.md)")
@@ -179,21 +209,41 @@ def summarize_url(url, today):
     return body, False
 
 
-def render_document(url, body, today):
+def site_label(name, url):
+    """대상 링크에 쓸 라벨. 설정한 이름이 없으면 호스트명으로 대신한다.
+
+    **빈 라벨을 절대 만들지 않는 것이 이 함수의 존재 이유다.** `[__""__](<주소>)` 는
+    Discord 에서 누를 글자가 없는 링크가 되어 사실상 사라진다. 호스트명은 URL 에서 바로
+    나오므로 실패할 수 없고, `URL_BRIEFING_NAME` 을 채우지 않은 설정에서도 보고서가
+    멀쩡히 나온다.
+
+    대괄호는 지운다 — 라벨 안의 `[` `]` 는 마스크 링크 문법을 깨서 Discord 에 문법이
+    글자 그대로 노출된다. 사람이 `.env` 에 적는 값이라 흔하지는 않지만, 깨진 것을
+    알아채는 곳이 이미 채널에 나간 메시지라 되돌릴 수가 없다.
+    """
+    label = re.sub(r"[\[\]]", "", name).strip()
+    return label or urlparse(url).netloc or url
+
+
+def render_document(url, name, body, today):
     """요약 본문을 하나의 마크다운 문서로 조립한다.
 
-    머리말에 모델/effort 를 남기는 이유는 `daily_briefing` 과 같다 — 나중에 품질이
-    달라졌을 때 어떤 모델이 쓴 글인지 문서만 보고 확인된다. 대상 URL 도 함께 남기는데,
-    보고서만 떼어 봐도 어디를 훑은 것인지 알 수 있어야 하기 때문이다 (특히 Discord 로
-    간 메시지에는 파일 경로조차 없다).
+    대상은 생짜 URL 이 아니라 **이름을 라벨로 단 마스크 링크**로 남긴다. 보고서만 떼어
+    봐도 어디를 훑은 것인지 알 수 있어야 하는데(Discord 로 간 메시지에는 파일 경로조차
+    없다), 커뮤니티 주소는 길어서 그대로 두면 머리말이 주소로 뒤덮인다. 항목의 글 제목과
+    같은 형식이라 읽는 쪽에서 규칙이 하나로 통일된다.
+
+    **모델/effort 는 일부러 넣지 않는다.** 알림으로 읽는 글에는 군더더기이고, 정작
+    필요한 진단 상황에서는 `claude_query.build_command()` 가 프로세스마다 한 번 찍는
+    `[System] claude CLI 모델: …` 이 cron 로그(`batch/logs/YYYY-MM-DD.log`)에 남아 있다.
+    즉 정보가 사라진 게 아니라 문서 밖으로 옮겨진 것이다 — 다만 문서 파일만 따로 보관하면
+    어떤 모델이 쓴 글인지는 알 수 없게 된다.
     """
-    model, effort = claude_query.describe_options()
     lines = [
         f"# {today} URL 브리핑",
         "",
-        f"> 생성: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · "
-        f"모델: {model} · effort: {effort}",
-        f"> 대상: {url}",
+        f"> 생성: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f'> 대상: [__"{site_label(name, url)}"__](<{url}>)',
         "",
         body,
         "",
@@ -224,7 +274,9 @@ def warn_if_too_long(document):
     print(f"[경고] 문서가 Discord 본문 상한을 넘었습니다: {total}자 "
           f"(상한 {discord_notify.CONTENT_LIMIT}자)")
     print("       전송 시 뒤쪽부터 잘립니다 — 마지막 항목들이 빠집니다.")
-    print("       batch/url_briefing.py 의 SYSTEM_PROMPT 분량 지시를 조이세요.")
+    print("       batch/url_briefing.py 의 SYSTEM_PROMPT 에서 설명 80자 지시를 줄이거나,")
+    print("       항목 수를 줄이세요. 제목·주소는 페이지가 정하는 길이라 조일 수 없으므로,")
+    print("       주소가 유난히 긴 사이트라면 항목 수 쪽을 먼저 줄이는 편이 확실합니다.")
 
 
 def notify_document(path, skip=False):
@@ -284,13 +336,14 @@ def main():
 
     warn_if_tool_missing()
 
+    name = (args.name or read_site_name()).strip()
     today = datetime.now().strftime("%Y-%m-%d")
-    print(f"[System] {today} URL 브리핑 시작 — 대상: {url}")
+    print(f"[System] {today} URL 브리핑 시작 — 대상: {site_label(name, url)} ({url})")
 
     started = time.monotonic()
     body, did_fail = summarize_url(url, today)
 
-    document = render_document(url, body, today)
+    document = render_document(url, name, body, today)
     warn_if_too_long(document)
 
     notify_failed = False

@@ -56,6 +56,18 @@ def read_url():
     return os.environ.get("URL_BRIEFING_URL", "").strip()
 
 
+def read_site_name():
+    """`URL_BRIEFING_NAME`(대상 사이트의 표시 이름)을 읽는다. 없으면 빈 문자열.
+
+    보고서에서 대상 링크의 라벨로 쓴다. 모델에게 물어보지 않고 설정에서 받는 이유는,
+    사이트 이름이 **실행마다 달라질 값이 아니기 때문**이다. 모델이 페이지에서 읽게 하면
+    매 실행 지어낼 여지가 생기고 페이지를 못 열었을 때 빈 값이 되는데, 설정값은 그 두 가지
+    실패가 아예 없다. 비워 두면 호스트명으로 대신한다 (`url_briefing.site_label()`).
+    """
+    load_batch_env()
+    return os.environ.get("URL_BRIEFING_NAME", "").strip()
+
+
 def output_dir():
     """요약 결과를 저장할 디렉터리.
 
