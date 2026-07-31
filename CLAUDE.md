@@ -118,7 +118,14 @@ python -m batch.daily_briefing                   # 정기 LLM 요약 → batch/o
 python -m batch.daily_briefing --topic "AI 동향"   # 주제 하나만 (반복 지정 가능)
 python -m batch.daily_briefing --stdout          # 파일 저장 없이 출력만
 python -m batch.daily_briefing --no-notify       # 저장만, Discord 전송 생략
-./batch/run.sh                                   # cron 래퍼 (cwd·PATH·로그 처리)
+
+python -m batch.url_briefing                     # URL 브리핑 → batch/output/url-YYYY-MM-DD.md
+python -m batch.url_briefing --url https://…/board   # .env 의 URL_BRIEFING_URL 대신 이 주소
+python -m batch.url_briefing --stdout            # 파일 저장 없이 출력만
+python -m batch.url_briefing --no-notify         # 저장만, Discord 전송 생략
+
+./batch/run.sh                                   # cron 래퍼 (cwd·PATH·로그 처리, 기본 daily_briefing)
+./batch/run.sh url_briefing                      # 잡 이름을 첫 인자로 (래퍼 수정 불필요)
 
 python -m batch.discord_notify --file batch/output/2026-07-30.md   # 결과 파일을 Discord 로 전송
 python -m batch.discord_notify "테스트 메시지"                       # 텍스트 직접 전송
@@ -165,9 +172,10 @@ The code is split into an `agent/` package with one module per pipeline stage �
   - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask(question, cancel_event=None)` (`Popen` + 워커 스레드, 취소 시 프로세스 kill), `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
   - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask(question, cancel_event=None)` (워커 스레드, 취소 시 결과 폐기), `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (hermes gateway)" 참고).
 - `batch/` — 정기 실행(배치) 잡. 모듈 하나가 잡 하나이며, 오디오도 모델도 건드리지 않는다 (아래 "Batch jobs" 참고):
-  - `batch/config.py` — `BATCH_DIR`, `DEFAULT_OUTPUT_DIR`, `load_batch_env()` (배치 전용 `.env` 적재 — 루트 `.env` 와의 분리를 담당하는 유일한 장치), `read_topics()`, `output_dir()`.
-  - `batch/claude_query.py` — 배치용 claude CLI 질의: `build_command()`, `ask(question, timeout=None)` (`subprocess.run`, 기본 300초), `fix_bullets()`, `describe_options()`. 모델/effort 해석과 실행 디렉터리는 `claude_p` 에서 import 한다.
+  - `batch/config.py` — `BATCH_DIR`, `DEFAULT_OUTPUT_DIR`, `load_batch_env()` (배치 전용 `.env` 적재 — 루트 `.env` 와의 분리를 담당하는 유일한 장치), `read_topics()`, `read_url()` (`URL_BRIEFING_URL`, 하나만), `output_dir()` (모든 잡이 공유 — 충돌 회피는 파일명 접두어 쪽).
+  - `batch/claude_query.py` — 배치용 claude CLI 질의: `build_command(system_prompt=None)`, `ask(question, timeout=None, system_prompt=None)` (`subprocess.run`, 기본 300초), `fix_bullets()`, `describe_options()`. 모델/effort 해석과 실행 디렉터리는 `claude_p` 에서 import 한다. `SYSTEM_PROMPT` 는 정기 요약용 **기본값**이고, 잡마다 다른 것은 이 프롬프트뿐이라 인자로만 열려 있다 (아래 참고).
   - `batch/daily_briefing.py` — 정기 LLM 요약 잡: `main()`, `parse_args()`, `build_prompt()`, `summarize_topic()`, `render_document()`, `warn_if_too_long()` (Discord 예산 초과 경고), `notify_document()` (저장 직후 Discord 전송, 실패 시 `True`).
+  - `batch/url_briefing.py` — URL 브리핑 잡 (커뮤니티 사이트 하나를 훑어 요약): `main()`, `parse_args()`, `validate_url()`, `warn_if_tool_missing()` (`WebFetch` 누락 경고), `build_prompt()`, `summarize_url()`, `render_document()`, `warn_if_too_long()`, `notify_document()`. 자체 `SYSTEM_PROMPT` 를 `claude_query.ask(system_prompt=…)` 로 넘긴다. 파일명 접두어는 `FILENAME_PREFIX`(`url-`).
   - `batch/discord_notify.py` — Discord 웹훅 전송. **잡이 아니라 잡들이 가져다 쓰는 공용 부품**이다: `webhook_url()` / `is_enabled()`, `content_length()` / `truncate()`, `send()` (실패는 예외), `notify()` (실패를 삼키고 bool), `main()` (단독 실행 CLI). `agent/` 는 물론 다른 배치 모듈도 import 하지 않는 잎(leaf)이라 어느 잡에서든 끌어다 쓸 수 있다 (아래 "Discord 알림" 참고).
   - `batch/run.sh` — cron 래퍼 (cwd → 저장소 루트, PATH 보강, `batch/logs/` 로 로깅). Python 이 아니므로 코드 규칙과 무관.
 
@@ -329,7 +337,12 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFF
 
 ### Batch jobs (`batch/`)
 
-Work that is too slow for a voice turn, or that should run without anyone asking, lives in `batch/` and runs from cron: `python -m batch.<잡이름>` from the repo root. The one job today is **정기 LLM 요약** (`batch/daily_briefing.py`) — it walks a topic list, asks the Claude Code CLI to summarize each with web search, and writes one markdown file per day (`batch/output/YYYY-MM-DD.md`, overwritten on re-run). Details and cron setup: `batch/README.md`.
+Work that is too slow for a voice turn, or that should run without anyone asking, lives in `batch/` and runs from cron: `python -m batch.<잡이름>` from the repo root. There are two jobs, both writing one markdown file per day (overwritten on re-run) and both notifying Discord after the save. Details and cron setup: `batch/README.md`.
+
+- **정기 LLM 요약** (`batch/daily_briefing.py`) — walks a topic list, asks the Claude Code CLI to summarize each with web search → `batch/output/YYYY-MM-DD.md`.
+- **URL 브리핑** (`batch/url_briefing.py`) — opens one community site with `WebFetch`, skims what is posted there right now, and writes an overview plus six items → `batch/output/url-YYYY-MM-DD.md`.
+
+**The output directory is shared; the filename prefix is what keeps the two apart.** Both read `BRIEFING_OUTPUT_DIR`, and only `FILENAME_PREFIX` (`url-`) stops the same day's results from overwriting each other — cheaper than a per-job directory key, but it means a new job must pick a prefix.
 
 **`python batch/daily_briefing.py` does not work, and that is why `-m` is the documented form.** Running a file inside the package puts `sys.path[0]` at `batch/`, so `import agent` fails; `-m` puts the cwd (repo root) on the path instead. The same cwd matters for a second reason — `agent/config.py`'s file paths are relative (`soundfile/…`) and the default output dir is repo-relative — so `batch/run.sh` `cd`s to the root before doing anything.
 
@@ -342,15 +355,27 @@ Work that is too slow for a voice turn, or that should run without anyone asking
 
 **Why `batch/claude_query.py` re-assembles the CLI command instead of calling `claude_p.ask()`.** Three things differ, all from "heard vs. read": the system prompt asks for a markdown list rather than three plain sentences with Hangul transliteration (a file has none of the TTS vocab limits, but it has a different budget — see below); nothing strips markdown, since that *is* the deliverable; and there is no barge-in to watch, so a plain `subprocess.run` with a much longer default timeout (300 s vs 60 s) replaces the `Popen`+thread dance. What it does **not** duplicate is `resolve_model()` / `resolve_effort()` / `WORK_DIR` — those are imported, because a second copy of the alias table drifts and then the same `.env` value runs a different model in voice than in batch (the reason `test-claude-cli.py` imports them too).
 
+**The same reasoning is why a second job did not get a second `claude_query`.** What differs between jobs is only the *shape of the deliverable* — a topic summary vs. a skim of a community page — so `build_command()` / `ask()` take an optional `system_prompt` and everything else (command assembly, model/effort resolution, JSON handling, `fix_bullets`) is shared. `claude_query.SYSTEM_PROMPT` is the default (정기 요약); `url_briefing` passes its own. Copying `build_command()` per job would mean one copy gets fixed and the rest silently drift — the same failure the imported alias table avoids.
+
 **The summary length is derived from the Discord budget, not from taste — and the derivation assumes one topic per run.** `SYSTEM_PROMPT` demands exactly 6 bullets, ≤200 characters each, source as an outlet name and never a URL. The arithmetic: 2000 (message body) − 90 (header) − ~16 (`## 제목`) − 9 (truncation notice) = 1885 for the bullets, and 6 × 203 ≈ 1218 → a 1324-character document. That leaves **44% of headroom** before anything is cut. It isn't tightened further because with a single topic there is nobody to share the budget with, and it isn't loosened because that headroom is the only insurance against the model ignoring the instruction. The URL ban is the same budget in another form — one link often exceeds 100 characters, and six of them eat two or three bullets' worth.
 
 **Raising the topic count breaks this arithmetic.** Six 200-character bullets per topic runs out of budget partway through the second topic, and later topics lose even their heading (the file still has everything). Scaling up means re-dividing the prompt's allowance by the topic count — roughly 3 bullets × 100 characters at five topics.
 
-The limit is a **best-effort instruction, not a guarantee**, which is why `daily_briefing.warn_if_too_long()` logs the overflow (only when a webhook is configured — warning daily about a limit that is never applied is how a warning gets ignored). Truncation stays as the backstop and cuts from the tail, so with one topic the loss is the last bullets — and since the prompt asks for most-important-first, what gets dropped is the least important.
+**`url_briefing.SYSTEM_PROMPT` is the same derivation with one more header line.** It demands an overview ≤150 characters plus exactly 6 bullets of ≤180 each: 2000 − ~200 (title, generation line, **and the target URL**) − 9 = 1791, and 150 + 6 × 183 ≈ 1248 → a ~1395-character document, 43% of headroom (measured, not estimated). The 20 characters a bullet gives up versus `daily_briefing` buy that URL line, which is there because a report read in Discord carries no file path — without it nothing says which site was skimmed. The in-bullet URL ban is more urgent here than in the topic job: community post links carry query strings and routinely exceed 100 characters.
+
+**This is also why the job takes exactly one URL rather than a comma-separated list like `BRIEFING_TOPICS`.** A second site would be cut from the message, and the fix is a second cron line (which also gets its own notification), not a longer value. `read_url()` therefore returns a single string.
+
+The limit is a **best-effort instruction, not a guarantee**, which is why each job's `warn_if_too_long()` logs the overflow (only when a webhook is configured — warning daily about a limit that is never applied is how a warning gets ignored). Truncation stays as the backstop and cuts from the tail, so with one topic the loss is the last bullets — and since the prompt asks for most-important-first, what gets dropped is the least important.
+
+The two jobs keep **separate copies** of that function. What they share is three lines ("over the limit ⇒ print"); what differs is the only useful part — which prompt to tighten. Parameterizing the advice would save no lines and couple the jobs.
 
 `fix_bullets()` is the one piece of post-processing: the model intermittently drops the space in `-항목`, which then renders as literal text instead of a list item. It repairs `-` only — not `*` (line-initial `*` may be emphasis) and not `-` followed by a digit (`-5도` is a negative number, and "fixing" it would change 영하 5도 into 5도). Missing a real bullet is cosmetic; corrupting a number is not.
 
-**Failure posture: one topic, not the whole day.** Each topic is a separate CLI call; a failure writes the reason into that section and the rest continue. Exit code tells cron what happened — `0` all succeeded, `1` did nothing (switch off / no `claude` / no topics), `2` the document was written but a topic failed **or the Discord send failed**. There is no hermes fallback here, unlike the voice chain: web search is the point of the job, so a local model can't stand in.
+**Failure posture: one topic, not the whole day.** Each topic is a separate CLI call; a failure writes the reason into that section and the rest continue. Exit code tells cron what happened — `0` all succeeded, `1` did nothing (switch off / no `claude` / no target), `2` the document was written but a topic failed **or the Discord send failed**. There is no hermes fallback here, unlike the voice chain: web search is the point of the job, so a local model can't stand in.
+
+`url_briefing` uses the same exit codes but **has no partial success** — one target means one CLI call. It still writes the failure document and still notifies, because "today's briefing broke" is exactly what should reach the channel when nobody is watching the job. Two extra `1` cases guard against a wasted 300-second call: an empty `URL_BRIEFING_URL`, and one that fails `validate_url()`. The scheme check matters more than it looks — handed `www.example.com`, the model does not fail, it web-searches for something similar and returns a plausible report, and a **wrong success** is far harder to notice than an error.
+
+**`warn_if_tool_missing()` warns but does not block.** `WebFetch` missing from `CLAUDE_CLI_ALLOWED_TOOLS` makes the report pure model memory, so it is worth saying loudly — but the check is a substring match on a tool name, so a CLI-side rename would break the check before it breaks the job. Failing hard there would make a correctly configured job unrunnable; the warning leaves the judgement to whoever reads the log, and `ask()`'s existing `턴 수: 1 (검색 미사용)` line catches the same condition from the other side.
 
 #### Discord 알림 (`batch/discord_notify.py`)
 
@@ -412,7 +437,7 @@ Both LLM skills' system prompts also ask for Hangul transliteration (see the two
 - **The agent is no longer 100% offline when hermes is enabled** — but hermes runs locally (127.0.0.1), so no cloud APIs are involved and the offline property holds at the network boundary.
 - **`CLAUDE_CLI_ENABLED=1` does break the offline property**, unlike hermes: `agent/skills/claude_p.py` shells out to Claude Code CLI, which calls the Anthropic API (and, with `--allowedTools "WebSearch,WebFetch"`, the open web). That is the point of the skill — answering questions a local model can't — but it means utterances leave the machine. Off by default.
 - Both LLM stages are gated by `.env` (`CLAUDE_CLI_ENABLED`; `HERMES_ENABLED`, falling back to `HERMES_API_KEY` presence when unset), not by `--environment`. In practice that means prod-only, since dev has no `.env`.
-- **`batch/` reads `batch/.env`, never the root `.env`** — so enabling the claude CLI for batch summaries does *not* enable it for voice turns, and vice versa. The same key names are reused with different values on purpose (voice keeps the timeout short because latency is felt; batch sets 300 s because nobody is waiting). A batch job with no `batch/.env` exits with code 1 instead of borrowing the voice settings. Batch summaries are cloud + web calls by definition, so the offline property does not apply to them at all — and `DISCORD_WEBHOOK_URL`, when set, adds one more outbound call (the result text leaves the machine for Discord).
+- **`batch/` reads `batch/.env`, never the root `.env`** — so enabling the claude CLI for batch summaries does *not* enable it for voice turns, and vice versa. The same key names are reused with different values on purpose (voice keeps the timeout short because latency is felt; batch sets 300 s because nobody is waiting). A batch job with no `batch/.env` exits with code 1 instead of borrowing the voice settings. Batch summaries are cloud + web calls by definition, so the offline property does not apply to them at all — and `DISCORD_WEBHOOK_URL`, when set, adds one more outbound call (the result text leaves the machine for Discord). `url_briefing` goes one step further: it fetches a named third-party site on a schedule, so that site sees a request from this machine every time cron fires.
 - Audio config is fixed at 16 kHz mono, 16-bit (`CHUNK=1280`, `RATE=16000` in `agent/config.py`).
 - `res0.wav` (wake acknowledgment sound) must exist in the working directory; if missing, `play_wav_file()` logs an error and the turn continues without it.
 - A mic and a speaker are required for the normal loop, but **not** for `--off-speaker`, which opens no audio device at all. Batch jobs need neither — they open no audio device and load no model.
@@ -425,8 +450,8 @@ Both LLM skills' system prompts also ask for Hangul transliteration (see the two
 - `requirements.txt` — 의존성 **정본**. 직접 import 하는 패키지만 핀과 함께 적고, 설치 방법·CUDA 런타임 주석·핀 갱신 명령도 파일 상단에 있다. 목록을 문서로 복사하지 말 것 (그래서 어긋났었다).
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
 - `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns, barge-in switch/threshold). Covers the **voice agent only** — batch has its own.
-- `batch/README.md` — batch job list, 공용 모듈(Discord 알림), cron 등록(래퍼가 처리하는 cwd/PATH/로그), 종료 코드, 설정 격리 방식, 새 잡 추가 절차.
-- `batch/.env.example` — template for the git-ignored `batch/.env` (batch-side Claude CLI settings, `BRIEFING_TOPICS`, `BRIEFING_OUTPUT_DIR`, Discord 웹훅 설정 `DISCORD_WEBHOOK_URL` / `DISCORD_USERNAME` / `DISCORD_TIMEOUT`).
+- `batch/README.md` — batch job list, 잡별 실행법, 공용 모듈(Discord 알림), cron 등록(래퍼가 처리하는 cwd/PATH/로그, 잡별 `DISCORD_USERNAME` 구분), 종료 코드, 설정 격리 방식, 새 잡 추가 절차.
+- `batch/.env.example` — template for the git-ignored `batch/.env` (batch-side Claude CLI settings, `BRIEFING_TOPICS`, `BRIEFING_OUTPUT_DIR`, `URL_BRIEFING_URL`, Discord 웹훅 설정 `DISCORD_WEBHOOK_URL` / `DISCORD_USERNAME` / `DISCORD_TIMEOUT`).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
 - `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model, `--effort` to set thinking depth).
 

@@ -42,8 +42,26 @@ def read_topics():
     return [topic.strip() for topic in raw.split(",") if topic.strip()]
 
 
+def read_url():
+    """`URL_BRIEFING_URL`(대상 사이트 주소 하나)를 읽는다. 없으면 빈 문자열.
+
+    주제 목록(`read_topics`)과 달리 **하나만** 받는다. 커뮤니티 한 곳을 훑어 하나의
+    보고서를 쓰는 잡이고, 결과 분량이 Discord 본문 예산 하나를 다 쓰도록 맞춰져 있어
+    여러 곳을 받으면 뒤쪽이 잘리기 때문이다 (`batch/url_briefing.py` 주석 참고).
+
+    키 이름에 `URL_` 을 붙인 이유는 `BRIEFING_*` 가 정기 요약 잡(`daily_briefing`)의
+    설정 묶음이기 때문이다. `BRIEFING_URL` 이라고 쓰면 그 묶음의 일부로 읽힌다.
+    """
+    load_batch_env()
+    return os.environ.get("URL_BRIEFING_URL", "").strip()
+
+
 def output_dir():
     """요약 결과를 저장할 디렉터리.
+
+    잡별로 나누지 않고 `BRIEFING_OUTPUT_DIR` 하나를 모든 잡이 함께 쓴다. 같은 날 여러
+    잡이 돌아도 겹치지 않는 것은 파일명 쪽에서 보장한다 (`YYYY-MM-DD.md` vs.
+    `url-YYYY-MM-DD.md`) — 잡마다 디렉터리 키를 늘리는 것보다 접두어 하나가 싸다.
 
     `BRIEFING_OUTPUT_DIR` 에 상대경로를 적으면 **cwd 기준**이다. cron 은 임의의 cwd 로
     돌기 때문에 `batch/run.sh` 가 저장소 루트로 이동한 뒤 실행한다.

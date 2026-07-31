@@ -13,6 +13,10 @@
    취소를 감시할 이유가 없고, `subprocess.run` 으로 충분하다. 대신 제한 시간을 훨씬
    길게 잡는다 (웹 검색을 여러 번 도는 것이 정상이고, 지연이 체감되지 않는다).
 
+아래 `SYSTEM_PROMPT` 는 **주제 요약(daily_briefing)용 기본값**이고, 다른 잡은
+`ask(..., system_prompt=...)` 로 자기 프롬프트를 넘긴다 (`batch/url_briefing.py`).
+잡마다 달라지는 것은 결과물의 모양뿐이라, 그것만 인자로 열고 나머지는 공유한다.
+
 모델/effort 해석 규칙과 실행 디렉터리는 스킬에서 **가져다 쓴다**(복사하지 않는다).
 별칭 표를 여기에 복사해두면 스킬 쪽과 조용히 어긋나, 같은 `.env` 값을 적었는데
 음성과 배치가 다른 모델로 도는 상태가 된다 — `test-claude-cli.py` 가 같은 이유로
@@ -107,8 +111,16 @@ def describe_options():
     return model or "CLI 기본값", effort or "CLI 기본값"
 
 
-def build_command():
-    """`claude --print …` 명령줄을 조립한다."""
+def build_command(system_prompt=None):
+    """`claude --print …` 명령줄을 조립한다.
+
+    `system_prompt` 를 주면 그것을 쓰고, 없으면 이 모듈의 `SYSTEM_PROMPT`(주제 요약용)
+    를 쓴다. 잡이 늘어나면 달라지는 것은 **결과물의 모양뿐**이라서(주제 요약이냐 커뮤니티
+    페이지 훑기냐) 프롬프트만 갈아 끼울 수 있게 열어 둔 것이다. 명령 조립·모델 해석·
+    JSON 처리·`fix_bullets` 는 잡이 늘어도 그대로이므로, 잡마다 이 함수를 복사해 두면
+    한쪽만 고쳐지고 나머지가 조용히 어긋난다 (모델 별칭 표를 스킬에서 import 하는 것과
+    같은 판단이다).
+    """
     global _logged_options
 
     load_batch_env()
@@ -130,7 +142,7 @@ def build_command():
         print(f"[System] claude CLI 모델: {model or 'CLI 기본값'} / "
               f"effort: {effort or 'CLI 기본값'}")
 
-    cmd += ["--append-system-prompt", SYSTEM_PROMPT]
+    cmd += ["--append-system-prompt", system_prompt or SYSTEM_PROMPT]
 
     # 도구 허용 목록. 빈 값이면 도구 목록 자체를 비운다 — 플래그를 생략하면 도구는
     # 살아 있고 권한만 없어서, 모델이 호출했다가 런타임에 거부당한다
@@ -149,7 +161,7 @@ def build_command():
     return cmd
 
 
-def ask(question, timeout=None):
+def ask(question, timeout=None, system_prompt=None):
     """claude CLI 에 질문을 보내고 마크다운 그대로의 답변 문자열을 반환한다.
 
     실패는 예외로 올린다 (`subprocess.TimeoutExpired` 포함) — 호출자가 주제 단위로
@@ -158,12 +170,14 @@ def ask(question, timeout=None):
     질문은 인자가 아니라 **표준입력**으로 넘긴다. '-' 로 시작하는 문장이 CLI 옵션으로
     오해받거나 긴 프롬프트가 인자 길이 제한에 걸리는 것을 피하려는 것으로,
     스킬과 `test-claude-cli.py` 가 쓰는 방식과 같다.
+
+    `system_prompt` 는 `build_command()` 로 그대로 넘어간다 (그쪽 주석 참고).
     """
     load_batch_env()
 
     if timeout is None:
         timeout = float(os.environ.get("CLAUDE_CLI_TIMEOUT", DEFAULT_TIMEOUT))
-    cmd = build_command()
+    cmd = build_command(system_prompt)
 
     # cwd 를 임시 디렉터리로 두는 이유는 스킬과 같다: 저장소 안에서 claude 를 돌리면
     # 이 저장소의 CLAUDE.md 가 프로젝트 지침으로 딸려 들어가 일반 주제 요약에까지
