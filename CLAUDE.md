@@ -458,7 +458,7 @@ Both LLM skills' system prompts also ask for Hangul transliteration (see the two
 - `requirements.txt` — 의존성 **정본**. 직접 import 하는 패키지만 핀과 함께 적고, 설치 방법·CUDA 런타임 주석·핀 갱신 명령도 파일 상단에 있다. 목록을 문서로 복사하지 말 것 (그래서 어긋났었다).
 - `GEMINI.md` — original project design doc (Korean). Describes an LLM-in-the-loop pipeline built on Ollama; the LLM stage now runs on hermes gateway instead (see above).
 - `.env.example` — template for the git-ignored `.env` (hermes settings, Claude Code CLI settings, audio device name patterns, barge-in switch/threshold). Covers the **voice agent only** — batch has its own.
-- `batch/README.md` — batch job list, 잡별 실행법, 공용 모듈(Discord 알림), cron 등록(래퍼가 처리하는 cwd/PATH/로그, 잡별 `DISCORD_USERNAME` 구분), 종료 코드, 설정 격리 방식, 새 잡 추가 절차.
+- `batch/README.md` — 배치 잡 개요(두 잡의 하는 일·출력 예시·종료 코드), 실행 방법 셋을 순서대로(① 로컬 `-m` 실행 + 설정 키 표 + 새 잡 추가 절차, ② `run.sh` 래퍼가 처리하는 cwd/PATH/로그, ③ crontab 등록과 잡별 `DISCORD_USERNAME` 구분), 마지막에 주의할 점. **운영 방법만 담는 문서**라, 분량이 Discord 예산에서 역산된 근거·마스크 링크 문법의 이유·`claude_query` 를 스킬과 따로 두는 이유 같은 "왜"는 이 파일(위 "Batch jobs")에만 있다.
 - `batch/.env.example` — template for the git-ignored `batch/.env` (batch-side Claude CLI settings, `BRIEFING_TOPICS`, `BRIEFING_OUTPUT_DIR`, `URL_BRIEFING_URL`, `URL_BRIEFING_NAME`, Discord 웹훅 설정 `DISCORD_WEBHOOK_URL` / `DISCORD_USERNAME` / `DISCORD_TIMEOUT`).
 - `test_hermes_api.py` — standalone hermes connectivity check (`python test_hermes_api.py "질문"`).
 - `test-claude-cli.py` — standalone Claude Code CLI check, same "질문 → 응답 → 통계" shape as the hermes one so the two backends can be compared (`python test-claude-cli.py "질문"`; `--with-tools` to allow tools, `--model` to pick a model, `--effort` to set thinking depth).

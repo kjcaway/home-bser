@@ -1,56 +1,27 @@
 # batch — 정기 실행(배치) 잡
 
-음성 턴 안에서 하기엔 너무 느리거나, 사람이 부르지 않아도 돌아야 하는 작업들을 모아둔
-디렉터리입니다. 모듈 하나가 잡 하나이고, 설정은 **루트 `.env` 가 아니라 `batch/.env`**
-에서 읽습니다.
+사람이 부르지 않아도 정해진 시각에 돌아야 하는 작업들입니다. 모듈 하나가 잡 하나이고,
+설정은 **프로젝트 루트의 `.env` 가 아니라 `batch/.env`** 에서 읽습니다.
 
+## 개요
 
-| 잡         | 모듈                        | 하는 일                                          |
-| --------- | ------------------------- | --------------------------------------------- |
-| 정기 LLM 요약 | `batch/daily_briefing.py` | 관심 **주제**를 claude CLI 의 웹 검색으로 훑어 날짜별 마크다운으로 저장 |
-| URL 브리핑   | `batch/url_briefing.py`   | 커뮤니티 **사이트 한 곳**을 직접 열어 훑고 요약 보고서를 날짜별 마크다운으로 저장 |
+두 잡 모두 claude CLI 로 요약을 만들어 **날짜별 마크다운 파일**로 저장하고, 웹훅이
+설정돼 있으면 그 파일을 **Discord 로 전송**합니다. 같은 날 다시 돌리면 파일을 덮어씁니다.
 
-
-잡이 아니라 **잡들이 가져다 쓰는 공용 모듈**도 있습니다.
-
-
-| 공용 모듈      | 모듈                        | 하는 일                                  |
-| ---------- | ------------------------- | ------------------------------------- |
-| Discord 알림 | `batch/discord_notify.py` | 텍스트를 Discord 웹훅으로 전송 (첨부파일 아닌 메시지 본문) |
-
-
-## 실행
-
-```bash
-# 저장소 루트에서 (최초 1회: 주제·URL·모델 설정)
-cp batch/.env.example batch/.env
-```
-
-> `**python batch/<잡이름>.py` 는 쓰지 않습니다.** 그렇게 부르면 `sys.path[0]` 이
-> `batch/` 가 되어 `import agent` 가 깨집니다. `-m` 은 cwd(저장소 루트)를 경로에 올려
-> 주므로 `agent` 를 그대로 쓸 수 있고, 저장소가 이미 쓰는 방식(`python -m agent.text_norm`)
-> 과 같습니다.
-
-두 잡 모두 저장이 끝나면 `DISCORD_WEBHOOK_URL` 이 설정된 경우에 한해 **저장된 파일을
-다시 읽어** Discord 로 보냅니다(아래 [공용 모듈](#공용-모듈-discord-알림-batchdiscord_notifypy)).
-웹훅이 없으면 조용히 넘어가므로 알림을 쓰지 않는 환경에서도 잡은 그대로 돕니다.
+| 잡 | 모듈 | 하는 일 | 결과 파일 |
+| --- | --- | --- | --- |
+| 정기 LLM 요약 | `batch/daily_briefing.py` | 관심 **주제**(`BRIEFING_TOPICS`)를 웹 검색으로 훑어 주제별로 요약 | `batch/output/YYYY-MM-DD.md` |
+| URL 브리핑 | `batch/url_briefing.py` | 커뮤니티 **사이트 한 곳**(`URL_BRIEFING_URL`)을 직접 열어 지금 올라온 글들을 요약 | `batch/output/url-YYYY-MM-DD.md` |
 
 ### 정기 LLM 요약 (`daily_briefing`)
 
-```bash
-./bin/python -m batch.daily_briefing
-./bin/python -m batch.daily_briefing --topic "AI 업계 주요 소식"   # 주제 하나만 (반복 가능)
-./bin/python -m batch.daily_briefing --stdout                    # 파일 저장 없이 출력만
-./bin/python -m batch.daily_briefing --output /tmp/brief.md       # 저장 경로 지정
-./bin/python -m batch.daily_briefing --no-notify                  # 저장만, Discord 전송 생략
-```
-
-결과는 `batch/output/YYYY-MM-DD.md` 로 저장됩니다.
+주제 목록을 순회하며 주제마다 claude 호출을 한 번씩 보냅니다. **주제 하나가 실패해도
+나머지는 계속** 진행하고, 실패한 자리에는 사유를 적습니다.
 
 ```markdown
-# 2026-07-30 브리핑
+# 2026-08-01 브리핑
 
-> 생성: 2026-07-30 07:00:12 · 모델: claude-sonnet-5 · effort: high · 주제 3개
+> 생성: 2026-08-01 07:00:12 · 모델: claude-sonnet-5 · effort: high · 주제 1개
 
 ## AI 업계 주요 소식
 
@@ -59,444 +30,212 @@ cp batch/.env.example batch/.env
 
 ### URL 브리핑 (`url_briefing`)
 
-`batch/.env` 의 `URL_BRIEFING_URL` 에 적힌 커뮤니티 사이트를 claude CLI 의 `WebFetch` 로
-직접 열어, 지금 올라와 있는 글들을 훑고 요약 보고서를 씁니다.
-
-```bash
-./bin/python -m batch.url_briefing
-./bin/python -m batch.url_briefing --url https://example.com/board   # .env 대신 이 URL
-./bin/python -m batch.url_briefing --name "클리앙 모두의공원"           # 링크 라벨 지정
-./bin/python -m batch.url_briefing --stdout                          # 파일 저장 없이 출력만
-./bin/python -m batch.url_briefing --output /tmp/url.md              # 저장 경로 지정
-./bin/python -m batch.url_briefing --no-notify                       # 저장만, Discord 전송 생략
-```
-
-결과는 `batch/output/url-YYYY-MM-DD.md` 로 저장됩니다.
+대상 페이지를 `WebFetch` 로 직접 열어 개요 한두 문장 + 항목 6개를 씁니다. 항목의 글
+제목은 **Discord 마스크 링크**(`[__"제목"__](<주소>)`)로 감쌉니다 — 긴 주소를 감추고,
+`< >` 로 링크 미리보기(임베드) 카드를 억제합니다.
 
 ```markdown
-# 2026-07-31 URL 브리핑
+# 2026-08-01 URL 브리핑
 
-> 생성: 2026-07-31 07:00:12
-> 대상: [__"클리앙 모두의공원"__](<https://example.com/board>)
+> 생성: 2026-08-01 07:00:12
+> 대상: [__"클리앙 모두의공원"__](<https://www.clien.net/service/board/park>)
 
-최근 며칠은 ... (개요 한두 문장, 150자 이내)
+최근 며칠은 ... (개요 150자 이내)
 
-- [__"체감 전기요금 정리해봄"__](<https://example.com/board/18928374>) 누진구간 계산이 틀렸다는 반박이 이어졌습니다. (설명 80자 이내)
+- [__"체감 전기요금 정리해봄"__](<https://example.com/18928374>) 누진구간 계산이 틀렸다는 반박이 이어졌습니다.
 - ... (항목 6개)
 ```
 
-**대상도 항목과 같은 링크 형식입니다.** 라벨은 `URL_BRIEFING_NAME`(또는 `--name`)에서
-읽고, **비워 두면 호스트명**(`www.clien.net`)을 씁니다 — 라벨이 비면 Discord 에서 누를
-글자가 없는 링크가 되기 때문에, 폴백이 있어야 설정을 안 채운 상태에서도 보고서가
-멀쩡히 나옵니다. 이름에 들어간 `[` `]` 는 링크 문법을 깨므로 자동으로 지웁니다.
+**URL 은 하나만 받습니다.** 요약 분량이 Discord 본문 2000자를 이 보고서 하나가 다 쓴다고
+보고 역산돼 있어, 두 번째 URL 부터는 메시지에서 잘려 나갑니다. 여러 곳을 훑고 싶으면
+**cron 줄을 나누세요** — 알림도 사이트별로 따로 옵니다.
 
-**이름을 모델에게 묻지 않고 설정에서 받는 이유**는 사이트 이름이 실행마다 달라질 값이
-아니기 때문입니다. 모델이 페이지에서 읽게 하면 매 실행 지어낼 여지가 생기고 페이지를 못
-열었을 때 빈 값이 되는데, 설정값에는 그 두 실패가 아예 없습니다.
+### 종료 코드
 
-> **머리말에 모델·effort 는 넣지 않습니다.** 알림으로 읽는 글에 군더더기라서인데,
-> 정보가 사라진 것은 아닙니다 — `[System] claude CLI 모델: …` 이 실행마다 cron 로그
-> (`batch/logs/YYYY-MM-DD.log`)에 남습니다. 다만 `.md` 파일만 따로 보관하면 어떤 모델이
-> 쓴 글인지는 알 수 없으니, 그게 필요하면 `render_document()` 에 되돌리면 됩니다
-> (`daily_briefing` 은 지금도 머리말에 남깁니다).
+두 잡이 같은 규약을 씁니다. cron 이 실패를 알아보는 유일한 수단입니다.
 
-### 글 제목이 링크인 이유 (Discord 문법)
+| 코드 | 뜻 |
+| --- | --- |
+| `0` | 성공 (알림을 보냈거나, 웹훅을 설정하지 않았거나) |
+| `1` | 설정 문제로 아무것도 하지 않음 (스위치 꺼짐 / `claude` 없음 / 주제·URL 없음·형식 오류) |
+| `2` | 문서는 만들었지만 **요약이 실패했거나 Discord 전송에 실패**함 |
 
-항목의 글 제목은 **Discord 마스크 링크**로 감쌉니다. 문법 세 조각에 각각 이유가 있습니다.
+웹훅을 설정하지 않은 것은 실패가 아닙니다. 매일 `2` 로 끝나면 cron 경보가 의미를 잃기
+때문입니다. 반대로 웹훅이 있는데 전송이 실패하면 `2` 입니다 — 아무도 지켜보지 않는 잡이라
+알림이 안 나갔다는 사실을 알 방법이 종료 코드뿐입니다.
 
+## 1. 로컬 실행 (개발·테스트)
 
-| 조각             | 하는 일                            | 빠뜨리면                       |
-| -------------- | ------------------------------- | -------------------------- |
-| `[제목](주소)`     | 긴 주소를 감추고 제목만 눌러 원문으로 이동        | 주소가 그대로 노출돼 읽기 어려움         |
-| `<` `>` (주소 감쌈) | 링크 미리보기(임베드) 억제                 | 링크 6개마다 카드가 붙어 메시지가 채널을 덮음 |
-| `__제목__`       | Discord 에서 밑줄 — 링크임을 눈에 띄게      | (선택) 링크 색만으로 구분            |
+### 최초 1회 — 설정 파일
 
-
-**웹훅이라서 됩니다.** Discord 는 마스크 링크를 **봇·웹훅이 보낸 메시지**의 본문에서
-렌더링합니다(사용자가 직접 친 메시지에서는 안 되는 것과 다릅니다). 이 잡은 웹훅으로
-보내므로 해당됩니다.
-
-> `__` 는 표준 마크다운에서 **볼드**입니다. 그래서 저장된 `.md` 파일을 마크다운 뷰어로
-> 열면 밑줄이 아니라 볼드로 보입니다 — 파일과 알림의 겉모습이 갈리는 것은 감수한
-> 값입니다.
-
-**모델이 주소를 지어내지 않도록** 프롬프트가 "페이지에서 실제로 확인한 주소만 쓰고,
-확실하지 않으면 링크 없이 제목만" 을 요구합니다. 죽은 링크는 링크가 없는 것보다 나쁘기
-때문입니다.
-
-**URL 은 하나만 받습니다.** 게을러서가 아니라 분량 때문입니다 — 요약 분량이 Discord 본문
-2000자를 이 보고서 하나가 다 쓴다고 보고 역산돼 있어서(아래
-[요약 분량](#요약-분량이-discord-예산에서-나오는-이유-대상-1개-전제)), 두 번째 URL 부터는
-메시지에서 잘려 나갑니다. 여러 곳을 훑고 싶으면 cron 줄을 나누세요 — 그러면 알림도 따로
-옵니다.
-
-**`CLAUDE_CLI_ALLOWED_TOOLS` 에 `WebFetch` 가 반드시 있어야 합니다.** 대상 페이지를 실제로
-여는 것이 이 잡의 존재 이유라, 없으면 모델의 기억으로 쓴 보고서가 나옵니다. 잡을 막지는
-않고 경고만 남기는데, 허용 목록은 문자열 대조라 CLI 쪽에서 도구 이름이 바뀌면 이 검사가
-먼저 틀리기 때문입니다 — 그때 잡을 죽이면 설정은 멀쩡한데 실행이 안 됩니다. 실제로
-도구를 못 쓴 실행은 `[System] claude 턴 수: 1 (검색 미사용)` 로 한 번 더 드러납니다.
-
-**URL 형식은 실행 즉시 검사합니다** (`http://` / `https://` 로 시작해야 하고 호스트가
-있어야 함). 스킴이 빠진 `www.example.com` 을 그대로 넘기면 모델이 페이지를 여는 대신
-웹 검색으로 비슷한 곳을 찾아 **그럴듯한 보고서를 써 옵니다.** 실패보다 '엉뚱한 성공'이
-알아채기 어렵고, 그 사실을 알기까지 제한 시간(기본 300초)을 다 씁니다.
-
-> 커뮤니티에 따라 JS 렌더링이나 robots.txt 로 `WebFetch` 가 막힐 수 있습니다. 새 사이트를
-> 걸 때는 cron 에 넣기 전에 `--stdout` 으로 한 번 돌려 실제로 내용이 나오는지 보세요.
-
-## 종료 코드
-
-cron 이 실패를 알아볼 수 있도록 구분합니다. 두 잡이 같은 규약을 씁니다.
-
-
-| 코드  | 뜻                                                            |
-| --- | ------------------------------------------------------------ |
-| `0` | 성공 (알림을 보냈거나, 웹훅을 설정하지 않았거나)                                 |
-| `1` | 설정 문제로 아무것도 하지 않음 (스위치 꺼짐 / `claude` 없음 / 대상 없음·URL 형식 오류)   |
-| `2` | 문서는 만들었지만 **요약이 실패했거나 Discord 전송에 실패**함                       |
-
-
-**웹훅을 설정하지 않은 것은 실패가 아닙니다** — 알림은 선택 기능이고, 안 쓰는 환경에서
-매일 `2` 로 끝나면 cron 경보가 의미를 잃습니다. 반대로 웹훅이 있는데 전송이 실패한 것은
-`2` 로 알립니다. 아무도 지켜보지 않는 잡이라, 알림이 안 나갔다는 사실을 알아챌 방법이
-종료 코드뿐이기 때문입니다(문서 자체는 저장되어 있습니다).
-
-**요약이 실패해도 문서는 남고 알림도 나갑니다.** `daily_briefing` 은 실패한 주제 자리에만
-사유를 적고 나머지 주제를 계속 요약합니다 — 검색 한 건이 타임아웃 났다고 그날 브리핑이
-통째로 없어지는 편이 더 나쁘기 때문입니다. `url_briefing` 은 대상이 하나뿐이라 부분 성공이
-없지만, 그래도 사유를 적은 문서를 쓰고 알림까지 보냅니다. "오늘 브리핑이 깨졌다"야말로
-채널에 떠야 할 소식이기 때문입니다.
-
-## 공용 모듈: Discord 알림 (`batch/discord_notify.py`)
-
-배치 결과를 Discord 채널에 **메시지 본문으로**(첨부파일 아님) 보냅니다. 잡이 아니라
-잡들이 가져다 쓰는 부품이라 텍스트만 받고 브리핑에 대해서는 아무것도 모릅니다.
-두 잡 모두 파일을 저장한 **직후** 각자의 `notify_document()` 에서 이것을 부릅니다 —
-메모리의 문서가 아니라 **저장된 파일을 다시 읽어** 보내는데, 채널에 올라간 내용과
-디스크에 남은 내용이 어긋나면 알림을 믿을 수 없게 되기 때문입니다.
-
-잡이 여럿이라 한 채널에 여러 종류의 알림이 쌓입니다. `DISCORD_USERNAME` 은 `batch/.env`
-에 하나뿐이라 그대로 두면 두 잡이 같은 이름으로 뜨는데, 실제 환경변수가 `.env` 보다
-우선하므로 **crontab 줄에서 잡별로 덮어쓰면** 구분됩니다.
-
-```cron
-0  7 * * * DISCORD_USERNAME="정기 브리핑" /Users/me/home-bser/batch/run.sh daily_briefing
-30 7 * * * DISCORD_USERNAME="URL 브리핑"  /Users/me/home-bser/batch/run.sh url_briefing
-```
-
-```python
-from batch import discord_notify
-
-discord_notify.notify(text)                   # 잡에서 쓰는 형태 — 성공 True / 실패 False (예외 없음)
-discord_notify.send(text, username="브리핑")   # 직접 다룰 때 — 실패는 예외
-discord_notify.truncate(text)                 # 2000자로 자르고 "(...생략)" 부착 (순수 함수)
-discord_notify.is_enabled()                   # DISCORD_WEBHOOK_URL 유무
-```
-
-단독 실행도 됩니다(웹훅 확인·수동 재전송용).
+이 파일이 없으면 잡은 아무것도 하지 않고 종료 코드 `1` 로 끝납니다 (루트 `.env` 를 대신
+읽지 않습니다).
 
 ```bash
-# 저장소 루트에서
+cd /path/to/home-bser        # 반드시 저장소 루트에서
+cp batch/.env.example batch/.env
+$EDITOR batch/.env
+```
+
+자주 건드리는 키만 추리면 아래와 같습니다. 전체 설명은 `batch/.env.example` 주석에 있고,
+**실제 환경변수가 이 파일보다 우선**합니다(그래서 cron 줄에서 잡별로 덮어쓸 수 있습니다).
+
+| 키 | 설명 |
+| --- | --- |
+| `CLAUDE_CLI_ENABLED` | 요약 백엔드 스위치. 꺼져 있으면 잡이 종료 코드 1 로 끝남 |
+| `CLAUDE_CLI_MODEL` / `CLAUDE_CLI_EFFORT` | 모델과 생각 깊이 |
+| `CLAUDE_CLI_TIMEOUT` | 호출당 제한 시간(초). 기본 300 |
+| `CLAUDE_CLI_ALLOWED_TOOLS` | 허용 도구. `WebSearch,WebFetch` |
+| `BRIEFING_TOPICS` | 정기 요약 주제(쉼표 구분) |
+| `BRIEFING_OUTPUT_DIR` | 결과 디렉터리(기본 `batch/output`). 모든 잡이 공유 |
+| `URL_BRIEFING_URL` / `URL_BRIEFING_NAME` | URL 브리핑 대상과 링크 라벨(비우면 호스트명) |
+| `DISCORD_WEBHOOK_URL` | **비우면 전송을 건너뜁니다**(별도 on/off 키 없음). URL 자체가 인증 수단이라 로그에 절대 출력하지 않습니다 |
+| `DISCORD_USERNAME` / `DISCORD_TIMEOUT` | 표시 이름 / 전송 제한 시간(기본 15초) |
+
+### 정기 LLM 요약
+
+```bash
+./bin/python -m batch.daily_briefing                     # batch/.env 의 주제 전체
+./bin/python -m batch.daily_briefing --topic "AI 동향"     # 주제 하나만 (반복 지정 가능)
+./bin/python -m batch.daily_briefing --stdout            # 파일 저장·전송 없이 화면 출력만
+./bin/python -m batch.daily_briefing --no-notify         # 저장만, Discord 전송 생략
+./bin/python -m batch.daily_briefing --output /tmp/a.md  # 저장 경로 지정
+```
+
+### URL 브리핑
+
+```bash
+./bin/python -m batch.url_briefing
+./bin/python -m batch.url_briefing --url https://example.com/board   # .env 대신 이 주소
+./bin/python -m batch.url_briefing --name "클리앙 모두의공원"          # 링크 라벨 지정
+./bin/python -m batch.url_briefing --stdout
+./bin/python -m batch.url_briefing --no-notify
+```
+
+### Discord 웹훅만 따로 확인
+
+```bash
 ./bin/python -m batch.discord_notify "테스트 메시지"
-./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md
-./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md --dry-run   # 보내지 않고 본문만 확인
+./bin/python -m batch.discord_notify --file batch/output/2026-08-01.md
+./bin/python -m batch.discord_notify --file batch/output/2026-08-01.md --dry-run   # 보내지 않고 본문만
 ```
 
+> **`python batch/daily_briefing.py` 는 쓰지 않습니다.** 그렇게 부르면 `sys.path[0]` 이
+> `batch/` 가 되어 `import agent` 가 깨집니다. `-m` 이 cwd(저장소 루트)를 경로에 올려 줍니다.
+> 새 사이트를 걸 때는 cron 에 넣기 전에 `--stdout` 으로 한 번 돌려 내용이 실제로
+> 나오는지 확인하세요 (JS 렌더링·robots.txt 로 `WebFetch` 가 막히는 곳이 있습니다).
 
-| 코드  | 뜻                                       |
-| --- | --------------------------------------- |
-| `0` | 전송 성공 (또는 `--dry-run` 정상 출력)            |
-| `1` | 설정·인자 문제 (웹훅 URL 없음 / 파일 없음 / 인자 조합 오류) |
-| `2` | 전송 실패 (HTTP 오류·타임아웃)                    |
+### 새 잡을 추가할 때
 
+1. `batch/<잡이름>.py` 를 만들고 `main()` **첫 줄에 `load_batch_env()`** 호출
+   (설정 격리가 호출 순서 계약이라 진입 함수마다 부릅니다).
+2. claude CLI 를 쓴다면 `claude_query.ask(prompt, system_prompt=...)` 로 **프롬프트만**
+   갈아 끼울 것 — 명령 조립·모델 해석·JSON 처리는 공유합니다.
+3. 결과 파일명에 **잡을 알아볼 접두어**를 붙일 것 (출력 디렉터리를 모든 잡이 공유하므로,
+   같은 날 도는 잡끼리 겹치지 않게 하는 것이 접두어뿐입니다).
+4. 알림이 필요하면 `discord_notify.notify(text)` 한 줄. 웹훅이 없으면 조용히 건너뜁니다.
 
-설정 키(`batch/.env`)는 셋입니다.
+## 2. `batch/run.sh` 로 실행
 
-
-| 키                     | 기본값      | 설명                                      |
-| --------------------- | -------- | --------------------------------------- |
-| `DISCORD_WEBHOOK_URL` | (없음)     | 채널 설정 → 연동 → 웹훅에서 발급. **비우면 전송을 건너뜁니다** |
-| `DISCORD_USERNAME`    | (웹훅 설정값) | 메시지에 표시할 이름. 여러 잡이 한 채널을 쓸 때 구분용        |
-| `DISCORD_TIMEOUT`     | `15`     | 전송 제한 시간(초)                             |
-
-
-### 요약 분량이 Discord 예산에서 나오는 이유 (대상 1개 전제)
-
-두 잡의 요약 프롬프트가 요구하는 **항목 수와 글자 수는 취향이 아니라, 하루에 대상 하나만
-돌린다는 전제로 Discord 본문 예산에서 역산한 값**입니다.
-
-`batch/claude_query.py`(정기 요약) — **항목 6개 · 항목당 200자 · 출처는 매체명(URL 금지)**
-
-```
-본문 상한 2000자 − 머리말 90자 − "## 주제" 제목 ~16자 − 잘림 표시 9자 = 1885자
-  항목 6개 × 203자("- " 와 줄바꿈 포함) ≈ 1218자 → 문서 전체 1324자  ✅ (여유 586자)
-```
-
-`batch/url_briefing.py`(URL 브리핑) — **개요 150자 + 항목 6개 · 설명 80자 + 제목 링크**
-
-```
-본문 상한 2000자 − 머리말(제목·생성 시각·대상 링크) ~118자 − 잘림 표시 9자 = 1873자
-  개요 152자 + 항목 6개 × 191자 ≈ 1298자 → 문서 전체 ~1415자  ✅ (여유 585자 = 41%)
-
-  항목 191자 = "- " 2 + 링크 문법 13 + 제목 25 + 주소 70 + 설명 80 + 줄바꿈 1
-```
-
-**설명이 80자로 짧은 것은 링크 값입니다.** 여기서 놓치기 쉬운 것 하나 —
-
-> **길이 상한은 화면에 보이는 글자가 아니라 전송되는 원문 기준입니다.** 주소를 마스크
-> 링크로 감춰도 예산은 전혀 줄지 않고, 오히려 문법 13자가 더 붙어 생짜 주소보다
-> **깁니다.** 링크는 보기 편해지는 대가로 예산을 쓰는 기능이지 아끼는 기능이 아닙니다.
-
-그 대가로 설명이 180자 → 80자가 됐습니다. 대신 설명이 길 이유도 줄었습니다 — 궁금하면
-눌러서 원문을 보면 되니까요. 제목과 주소는 **페이지가 정하는 길이라 지시로 조일 수 없어**
-평균치(제목 25자·주소 70자)로 잡았고, 최악 조건(제목 40자·주소 90자·긴 사이트 이름)에서도
-1634자로 상한 안에 들어옵니다. 머리말에서 모델·effort 줄을 뺀 것이 대상 링크 문법 값을
-치르고도 남아, 링크를 넣기 전(1376자·여유 45%)과 거의 같은 여유를 유지합니다.
-
-설명 **안에** 생짜 주소를 금지하는 이유도 같은 예산입니다 — 커뮤니티 게시글 주소는 쿼리
-문자열이 붙어 100자를 넘기 일쑤라, 링크 밖에 또 적으면 항목 하나가 통째로 날아갑니다.
-
-
-모델이 지시보다 길게 쓸 때 언제 잘리는지 (정기 요약 기준. URL 브리핑도 여유 40%로 거의
-같지만, 초과분이 설명에만 붙고 제목·주소는 그대로라 실제로는 더 늦게 잘립니다).
-
-
-| 모델이 실제로 쓴 분량      | 문서      | 결과                         |
-| ----------------- | ------- | -------------------------- |
-| 지시대로 (항목 200자)    | 1,324자  | 전문 그대로 전송                  |
-| 30% 초과 (260자)     | 1,721자  | 전문 그대로 전송                  |
-| **44% 초과 (288자)** | ~1,900자 | 한계선                        |
-| 60% 초과 (320자)     | 2,105자  | 마지막 항목 일부가 `(...생략)` 으로 잘림 |
-
-
-상한을 더 조이지 않는 이유는 대상이 하나뿐이라 예산을 나눠 쓸 상대가 없기 때문이고,
-더 늘리지 않는 이유는 이 40%대 여유가 프롬프트 순응도에 대한 유일한 보험이기 때문입니다.
-잘림은 문서 **뒤쪽**에서 일어나므로 사라지는 것은 마지막 항목이고, 프롬프트가 "중요한
-것부터"를 요구하니 잃는 쪽은 항상 덜 중요한 항목입니다.
-
-> **대상을 2개 이상으로 늘리면 이 계산이 깨집니다.** 항목 6개를 대상마다 쓰면 두 번째
-> 대상 중간에서 예산이 끝나고, 뒤쪽은 제목조차 안 보입니다(파일에는 온전히 남습니다).
-> `daily_briefing` 은 `SYSTEM_PROMPT` 의 분량을 주제 수로 나눠 다시 잡으면 됩니다
-> (주제 5개면 항목 3개 × 100자 수준). `url_briefing` 은 애초에 URL 을 하나만 받으므로,
-> 여러 사이트를 훑고 싶으면 프롬프트를 고치는 대신 **cron 줄을 나누세요.**
-
-이 상한은 **모델이 지켜 줄 때만 유효한 최선 노력**이라, 넘긴 날에는 각 잡의
-`warn_if_too_long()` 이 경고를 남깁니다(웹훅을 설정한 경우에만).
-
-```
-[경고] 문서가 Discord 본문 상한을 넘었습니다: 2105자 (상한 2000자)
-       전송 시 뒤쪽부터 잘립니다 — 주제가 하나면 마지막 항목들이, 여러 개면 뒤 주제가 통째로 빠집니다.
-       batch/claude_query.py 의 SYSTEM_PROMPT 분량 지시를 조이거나 주제 수를 줄이세요.
-```
-
-두 잡이 같은 이름의 함수를 각자 갖고 있는데, 합치지 않은 이유는 공유되는 것이
-"넘었으면 출력한다" 세 줄뿐이고 정작 쓸모 있는 부분(**어느 프롬프트를 조여야 하는지**)이
-잡마다 다르기 때문입니다. 그 안내를 인자로 뽑으면 줄 수는 그대로인데 잡끼리 엮이기만
-합니다.
-
-**출처를 URL 로 받지 않는 것도 같은 이유입니다** — 링크 하나가 100자를 넘는 일이 흔해서,
-여섯 개면 항목 두세 개 분량을 통째로 먹습니다.
-
-동작에서 알아둘 점 넷.
-
-- **길이 초과는 자릅니다.** Discord 본문 상한은 2000자입니다. 넘으면 **줄 경계**에서
-끊고 `(...생략)` 을 붙입니다(마크다운 목록이 줄 중간에서 잘리면 읽을 수 없게 되는데,
-줄 단위로 끊으면 잃는 것은 마지막 한 줄뿐입니다). 줄바꿈이 거의 없어 예산의 절반도
-못 채우는 문서는 글자 단위로 끊습니다. 길이는 `len()` 이 아니라 UTF-16 코드 단위로
-세는데, 이모지 한 글자가 Discord 카운터에서 2를 차지해 경계에서 400 으로 거절당하기
-때문입니다.
-- **여러 메시지로 쪼개지 않습니다.** 전문은 원본 파일에 남아 있고 메시지는 알림입니다 —
-잡 하나가 채널에 메시지를 여러 개 쌓으면 알림으로서 안 읽히게 됩니다.
-- **웹훅 URL 이 곧 스위치입니다.** 별도 `DISCORD_ENABLED` 를 두지 않았습니다. 보낼 곳이
-없는데 "켜짐"인 상태가 성립하지 않기 때문입니다. 잠시 끄려면 URL 을 비우세요.
-URL 자체가 인증 수단이라 **로그·오류 메시지에 절대 출력하지 않습니다.**
-- **잡에서는 `notify()` 를 씁니다.** 이미 저장된 결과물이 알림 실패 때문에 없던 일이 되면
-안 되므로, 실패는 로그만 남기고 `False` 를 반환합니다. 429(레이트 리밋)는
-`retry_after` 만큼 기다렸다 **한 번만** 재시도합니다(최대 5초) — cron 잡이 알림 하나에
-몇 분씩 매달릴 이유가 없습니다.
-
-## 설정이 루트 `.env` 와 분리되는 방식
-
-`batch/config.py` 의 `load_batch_env()` 하나가 전부입니다.
-
-`agent.config.load_env_file()` 은 여러 번 불려도 **첫 호출만 실제로 파싱**하는 전역
-가드를 갖고 있고, 스킬들(`claude_p.is_enabled()` 등)은 내부에서 인자 없이 그것을 호출해
-루트 `.env` 를 읽습니다. 배치가 **먼저** 자기 파일을 지정해 부르면 이후 스킬 쪽 호출이
-no-op 이 되어, 루트 `.env` 는 아예 읽히지 않습니다.
-
-순서가 곧 계약이므로 잊기 쉽습니다. 그래서 `load_batch_env()` 를 **배치 쪽 모든 진입
-함수의 첫 줄**에서 호출합니다(스킬들이 `is_enabled()` 마다 `load_env_file()` 을 부르는
-것과 같은 이유). 새 배치 모듈을 추가할 때도 같은 규칙을 지키세요.
-
-`batch/.env` 는 루트 `.gitignore` 의 `.env` 패턴(슬래시가 없어 모든 하위 경로에 적용)에
-이미 걸려 커밋되지 않습니다. `batch/.env.example` 은 무시되지 않으므로 템플릿으로
-커밋됩니다.
-
-## claude CLI 호출을 스킬과 따로 두는 이유
-
-`batch/claude_query.py` 는 `agent/skills/claude_p.py` 의 `ask()` 를 쓰지 않고 명령을
-따로 조립합니다. 차이는 셋이고 모두 "결과를 귀로 듣는가 / 눈으로 읽는가" 에서 나옵니다.
-
-
-|          | 음성 스킬                               | 배치                                                      |
-| -------- | ----------------------------------- | ------------------------------------------------------- |
-| 시스템 프롬프트 | 최대 3문장 평문, 영문은 한글 음차 (TTS vocab 제약) | 마크다운 목록 6개, 항목당 200자, 출처는 매체명 (Discord 예산 제약, 주제 1개 전제) |
-| 후처리      | `strip_markdown()` 으로 목록·링크 제거      | 마크다운이 결과물이므로 그대로                                        |
-| 취소·제한 시간 | 끼어들기 감시 필요(`Popen`+스레드), 기본 60초     | 끊을 사용자가 없음(`subprocess.run`), 기본 300초                   |
-
-
-단, **모델/effort 해석 규칙과 실행 디렉터리는 스킬에서 import 해서 씁니다.** 별칭 표를
-복사해두면 스킬 쪽과 조용히 어긋나, 같은 `.env` 값을 적었는데 음성과 배치가 다른
-모델로 도는 상태가 됩니다 (`test-claude-cli.py` 가 같은 이유로 `resolve_model()` 을
-가져다 쓰는 것과 같은 판단입니다).
-
-### 잡마다 다른 것은 시스템 프롬프트뿐입니다
-
-`claude_query.SYSTEM_PROMPT` 는 **정기 요약용 기본값**이고, 다른 잡은 자기 프롬프트를
-인자로 넘깁니다.
-
-```python
-claude_query.ask(prompt)                                    # daily_briefing — 기본 프롬프트
-claude_query.ask(prompt, system_prompt=SYSTEM_PROMPT)       # url_briefing — 자기 프롬프트
-```
-
-잡이 늘어나도 달라지는 것은 **결과물의 모양뿐**이라(주제 요약이냐 커뮤니티 페이지
-훑기냐), 그것만 인자로 열고 명령 조립·모델 해석·JSON 처리·`fix_bullets` 는 공유합니다.
-잡마다 `build_command()` 를 복사해두면 한쪽만 고쳐지고 나머지가 조용히 어긋납니다 —
-바로 위에서 별칭 표를 복사하지 않는 것과 같은 판단입니다.
-
-## 새 배치 잡 추가
-
-1. `batch/<잡이름>.py` 를 만들고 `main()` 에서 **첫 줄에 `load_batch_env()`** 호출.
-2. 저장소의 코드 규칙(한 파일에 클래스 하나 또는 클래스 없이 함수 여럿)을 그대로 따름.
-3. claude CLI 를 쓴다면 `claude_query.ask(prompt, system_prompt=...)` 로 프롬프트만
- 갈아 끼울 것 (바로 위 [시스템 프롬프트](#잡마다-다른-것은-시스템-프롬프트뿐입니다) 참고).
-4. 결과 파일명에 **잡을 알아볼 접두어**를 붙일 것. 출력 디렉터리(`BRIEFING_OUTPUT_DIR`)를
- 모든 잡이 함께 쓰므로, 같은 날 도는 잡끼리 겹치지 않게 하는 것이 접두어뿐입니다
- (`YYYY-MM-DD.md` vs. `url-YYYY-MM-DD.md`).
-5. `./bin/python -m batch.<잡이름>` 으로 실행되는지 확인.
-6. cron 은 `<저장소 절대경로>/batch/run.sh <잡이름>` 으로 등록 (아래 [cron 등록](#cron-등록) 참고).
-7. 결과를 알리고 싶으면 `discord_notify.notify(text)` 한 줄이면 됩니다. 웹훅 URL 이
- 없으면 조용히 건너뛰므로, 알림을 안 쓰는 환경에서도 잡은 그대로 돕니다.
-
-## cron 등록
-
-여기서는 **정기 LLM 요약(`batch/daily_briefing.py`)** 을 매일 아침 7시에 돌리는 경우를
-그대로 따라 할 수 있게 적습니다.
-
-> **crontab 에 `python -m batch.daily_briefing` 을 직접 적지 마세요.** cron 은 cwd 가
-> `$HOME` 이고 PATH 가 `/usr/bin:/bin` 수준이라, 그대로 적으면 `import agent` 도
-> `claude` 실행도 실패합니다. 등록 대상은 언제나 래퍼인 `batch/run.sh` 입니다.
-
-**① 래퍼에 실행 권한 주기 (최초 1회, 저장소 루트에서)**
+cron 용 래퍼입니다. 첫 인자가 잡 이름이고(생략 시 `daily_briefing`), 그 뒤 인자는 잡으로
+그대로 전달됩니다.
 
 ```bash
-chmod +x batch/run.sh
+chmod +x batch/run.sh                    # 최초 1회
+
+./batch/run.sh                           # = batch.daily_briefing
+./batch/run.sh daily_briefing
+./batch/run.sh url_briefing
+./batch/run.sh url_briefing --stdout     # 뒤 인자는 잡으로 그대로 전달
+
+tail -f batch/logs/$(date +%F).log       # 실행 결과 확인
 ```
 
-**② 저장소의 절대 경로 확인** — crontab 에는 상대 경로를 쓸 수 없습니다.
+래퍼가 대신 해 주는 것은 셋이고, **모두 cron 에서만 문제가 되는 것들**입니다.
 
-```bash
-cd /path/to/home-bser && pwd
-# → /Users/me/home-bser
-```
-
-**③ `crontab -e` 로 열어 한 줄 추가**
-
-```cron
-# 매일 07:00 정기 LLM 요약 (batch/daily_briefing.py)
-0 7 * * * /Users/me/home-bser/batch/run.sh daily_briefing
-```
-
-`daily_briefing` 은 `batch/` 안의 **모듈 이름**이고, 래퍼가 그것을 그대로
-`./bin/python3 -m batch.daily_briefing` 으로 실행합니다. 첫 인자를 생략해도 기본값이
-`daily_briefing` 이라 같은 동작이지만, 잡이 늘어났을 때 crontab 만 보고 무엇이 도는지
-알 수 있도록 **명시하는 편**을 권합니다.
-
-**④ 확인**
-
-```bash
-crontab -l                                     # 등록됐는지
-./batch/run.sh daily_briefing                  # cron 을 기다리지 말고 지금 한 번 (아래 주의 참고)
-tail -f batch/logs/$(date +%F).log             # 결과 로그
-```
-
-### 자주 쓰는 변형
-
-```cron
-# 평일(월~금)만 07:00
-0 7 * * 1-5 /Users/me/home-bser/batch/run.sh daily_briefing
-
-# batch/.env 의 BRIEFING_TOPICS 대신 crontab 에서 주제 지정
-0 7 * * * /Users/me/home-bser/batch/run.sh daily_briefing --topic "AI 업계 주요 소식"
-
-# 이 실행에만 설정 덮어쓰기 (실제 환경변수가 batch/.env 보다 우선)
-0 7 * * * CLAUDE_CLI_EFFORT=low /Users/me/home-bser/batch/run.sh daily_briefing
-
-# 저장만 하고 Discord 전송은 생략
-0 7 * * * /Users/me/home-bser/batch/run.sh daily_briefing --no-notify
-```
-
-### URL 브리핑을 함께 돌릴 때
-
-잡 이름만 바꾸면 됩니다. `run.sh` 는 손댈 것이 없습니다.
-
-```cron
-# 매일 07:30 URL 브리핑
-30 7 * * * /Users/me/home-bser/batch/run.sh url_briefing
-```
-
-**여러 커뮤니티를 훑고 싶으면 값을 늘리는 대신 줄을 나눕니다.** 분량이 대상 하나를
-전제로 역산돼 있어 한 문서에 여러 사이트를 담으면 뒤쪽이 잘리기 때문입니다
-([요약 분량](#요약-분량이-discord-예산에서-나오는-이유-대상-1개-전제) 참고). 나눠 두면 알림도
-사이트별로 따로 옵니다.
-
-```cron
-30 7 * * * URL_BRIEFING_URL=https://a.example/board /Users/me/home-bser/batch/run.sh url_briefing
-40 7 * * * URL_BRIEFING_URL=https://b.example/board /Users/me/home-bser/batch/run.sh url_briefing
-```
-
-> **다만 결과 파일은 하루에 하나(`url-YYYY-MM-DD.md`)라 나중에 돈 쪽이 덮어씁니다.**
-> 둘 다 파일로 남겨야 하면 `--output` 으로 경로를 갈라 주세요. Discord 알림은 각 실행마다
-> 나가므로 채널에는 둘 다 남습니다.
->
-> ```cron
-> 40 7 * * * URL_BRIEFING_URL=https://b.example/board /Users/me/home-bser/batch/run.sh url_briefing --output batch/output/url-b-$(date +\%F).md
-> ```
->
-> crontab 에서 `%` 는 개행으로 해석되므로 `\%` 로 이스케이프해야 합니다(아래
-> [주의할 점](#주의할-점) 참고).
-
-`--url` 로 crontab 에 직접 적어도 되지만, 환경변수 쪽을 권합니다 — 잡의 다른 설정과 같은
-자리(`batch/.env` 의 키 이름)에 보여서 어디를 고쳐야 하는지 헷갈리지 않습니다.
-
-`run.sh` 뒤의 인자는 전부 잡으로 그대로 전달됩니다(`"$@"`).
-
-### 주의할 점
-
-- **출력 리디렉션(`>> log 2>&1`)을 붙이지 마세요.** `run.sh` 가 이미
-`batch/logs/YYYY-MM-DD.log` 로 보내고 있어, 덧붙이면 로그가 둘로 갈립니다.
-- `**%` 는 crontab 에서 특수문자입니다.** 명령 안에 `%` 가 들어가면 개행으로 해석되므로
-`\%` 로 이스케이프해야 합니다 (주제에 `%` 를 쓸 때만 해당).
-- **등록 직후 `./batch/run.sh daily_briefing` 을 직접 한 번 돌려보세요.** claude CLI 는
-로그인 인증을 쓰기 때문에, 대화형 셸에서는 되던 것이 cron 사용자 환경에서는 인증을
-못 찾아 실패할 수 있습니다. PATH 문제와는 원인이 다르고, 로그를 봐야 구분됩니다.
-- **macOS 에서는 cron 이 TCC(개인정보 보호) 제한을 받습니다.** 홈 디렉터리 아래 파일
-접근이 막히면 `cron` 에 '전체 디스크 접근 권한'을 주거나 `launchd`(launchctl)로
-등록하세요. 운영 대상인 Ubuntu 에서는 해당하지 않습니다.
-- 시각은 **시스템 로컬 시간대** 기준입니다.
-
-### 래퍼가 대신 해 주는 것
-
-`batch/run.sh` 가 처리하는 cron 특유의 문제는 셋입니다.
-
-1. **cwd** — 저장소 루트로 이동합니다. 설정의 파일 경로가 상대경로이고 출력 기본
- 경로도 저장소 기준인데, cron 은 임의의 cwd(보통 `$HOME`)로 실행합니다.
-2. **PATH** — cron 의 PATH 는 `/usr/bin:/bin` 수준이라 `claude`(와 그 node 런타임)를
- 못 찾는 일이 흔합니다. 대표 설치 경로를 앞에 붙입니다. 다른 곳에 설치했다면
- `run.sh` 나 crontab 의 `PATH=` 줄에 추가하세요.
-3. **로그** — cron 은 출력을 메일로 보내려 하는데 서버에 메일이 없으면 그냥 사라집니다.
- `batch/logs/YYYY-MM-DD.log` 로 남깁니다.
+1. **cwd** — 저장소 루트로 이동합니다. 설정의 파일 경로가 상대경로인데 cron 은 임의의
+   cwd(보통 `$HOME`)로 실행합니다.
+2. **PATH** — cron 의 PATH 는 `/usr/bin:/bin` 수준이라 `claude`(와 node 런타임)를 못 찾는
+   일이 흔합니다. 대표 설치 경로를 앞에 붙입니다. 다른 곳에 설치했다면 `run.sh` 의
+   `export PATH=...` 줄에 추가하세요.
+3. **로그** — cron 은 출력을 메일로 보내려 하는데 서버에 메일이 없으면 사라집니다.
+   `batch/logs/YYYY-MM-DD.log` 로 남깁니다.
 
 또한 venv 의 `./bin/python3` 을 직접 부르므로 `source bin/activate` 가 필요 없고, 잡의
-종료 코드는 그대로 cron 에 전달됩니다([종료 코드](#종료-코드) 참고).
+종료 코드는 그대로 cron 에 전달됩니다.
+
+## 3. crontab 등록
+
+crontab 에는 **절대 경로**로, 그리고 반드시 **래퍼(`run.sh`)** 를 적습니다.
+
+```bash
+cd /path/to/home-bser && pwd     # → /home/me/home-bser (이 값을 아래에 씁니다)
+crontab -e
+```
+
+```cron
+# 매일 07:00 정기 LLM 요약
+0 7 * * * /home/me/home-bser/batch/run.sh daily_briefing
+
+# 매일 07:30 URL 브리핑
+30 7 * * * /home/me/home-bser/batch/run.sh url_briefing
+```
+
+### 잡별로 설정 덮어쓰기
+
+crontab 의 명령 필드는 `/bin/sh -c` 로 실행되므로, 명령 **앞에 공백으로 나열**하면 환경
+변수를 몇 개든 넘길 수 있습니다.
+
+```cron
+# 사이트별로 줄을 나누고, 알림 이름까지 구분
+30 7 * * * URL_BRIEFING_URL=https://www.clien.net/service/board/park URL_BRIEFING_NAME="클리앙 모두의공원" DISCORD_USERNAME="클리앙 브리핑" /home/me/home-bser/batch/run.sh url_briefing
+
+# 이 실행에만 effort 낮추기
+0 7 * * * CLAUDE_CLI_EFFORT=low /home/me/home-bser/batch/run.sh daily_briefing
+```
+
+**crontab 맨 위의 `NAME=value` 줄과는 다른 물건입니다.** 상단 줄은 그 아래 **모든** 잡에
+적용되고 셸 파싱도 되지 않으므로, `PATH` 처럼 전체 공통인 것에만 쓰세요.
+
+변수가 서너 개를 넘으면 사이트별 래퍼가 읽기 편하고, 셸 파일 안에서는 `%` 이스케이프를
+신경 쓸 필요가 없어 더 확실합니다.
+
+```bash
+#!/usr/bin/env bash
+# batch/run-clien.sh
+export URL_BRIEFING_URL="https://www.clien.net/service/board/park"
+export URL_BRIEFING_NAME="클리앙 모두의공원"
+export DISCORD_USERNAME="클리앙 브리핑"
+exec "$(dirname "$0")/run.sh" url_briefing "$@"
+```
+
+### 등록 전에 그 줄을 그대로 돌려보세요
+
+적을 줄에서 **스케줄만 떼고** `sh -c` 로 감싸 실행합니다. cron 과 같은 셸이라 zsh 에서만
+되는 문법에 속지 않습니다.
+
+```bash
+sh -c 'URL_BRIEFING_URL=https://example.com/board URL_BRIEFING_NAME="예시" /home/me/home-bser/batch/run.sh url_briefing'
+tail -f batch/logs/$(date +%F).log
+```
+
+## 주의할 점
+
+- **`%` 는 crontab 특수문자입니다.** 명령 안의 `%` 는 개행으로 해석되고 그 뒤는 stdin 으로
+  넘어갑니다. **퍼센트 인코딩 URL** 이 대표적인 함정 — `topics/%EC%A3%BC%EC%8B%9D` 는 첫
+  `%` 에서 명령이 끊겨 `run.sh` 가 아예 실행되지 않는데 종료 코드는 0 이라 cron 은 정상으로
+  봅니다. `\%` 로 이스케이프하거나 사이트별 래퍼를 쓰세요.
+- **절대 경로 + `chmod +x`, 그리고 출력 리디렉션 금지.** crontab 에 상대 경로는 쓸 수 없고,
+  `>> log 2>&1` 을 덧붙이면 `run.sh` 의 로그와 둘로 갈립니다.
+- **등록 직후 한 번은 직접 돌려보세요.** claude CLI 는 로그인 인증을 쓰기 때문에, 대화형
+  셸에서는 되던 것이 cron 사용자 환경에서는 인증을 못 찾아 실패할 수 있습니다.
+- **결과 파일은 하루에 하나씩 덮어씁니다.** 같은 잡을 하루에 여러 번 돌리면 파일은 마지막
+  것만 남습니다(Discord 알림은 실행마다 나갑니다). 둘 다 남기려면 `--output` 으로 경로를
+  가르세요.
+- **Discord 본문 2000자를 넘으면 뒤쪽이 잘립니다.** 로그에 `[경고] 문서가 Discord 본문
+  상한을 넘었습니다` 로 남고, 전문은 원본 파일에 그대로 있습니다.
+- **`URL_BRIEFING_URL` 에는 스킴(`https://`)을 꼭 붙이고, 허용 도구를 비우지 마세요.**
+  스킴이 없으면 실행 즉시 오류이고, `WebFetch` 가 빠지면 페이지 대신 모델의 기억으로 쓴
+  보고서가 나옵니다(로그의 `턴 수: 1 (검색 미사용)` 이 그 신호).
+- **시각은 시스템 로컬 시간대 기준**입니다. macOS 는 cron 이 TCC 제한을 받으므로 홈
+  디렉터리 접근이 막히면 `launchd` 로 등록하세요(Ubuntu 는 해당 없음).
