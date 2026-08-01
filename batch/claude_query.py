@@ -13,9 +13,19 @@
    취소를 감시할 이유가 없고, `subprocess.run` 으로 충분하다. 대신 제한 시간을 훨씬
    길게 잡는다 (웹 검색을 여러 번 도는 것이 정상이고, 지연이 체감되지 않는다).
 
-아래 `SYSTEM_PROMPT` 는 **주제 요약(daily_briefing)용 기본값**이고, 다른 잡은
-`ask(..., system_prompt=...)` 로 자기 프롬프트를 넘긴다 (`batch/url_briefing.py`).
-잡마다 달라지는 것은 결과물의 모양뿐이라, 그것만 인자로 열고 나머지는 공유한다.
+**시스템 프롬프트는 이 모듈에 두지 않는다.** 잡마다 달라지는 것은 결과물의 모양뿐인데
+(주제 요약이냐 커뮤니티 페이지 훑기냐), 그 모양이 곧 잡의 정체다. 그래서 프롬프트는
+잡 모듈이 각자 갖고(`daily_briefing.SYSTEM_PROMPT`, `url_briefing.SYSTEM_PROMPT`)
+`ask(..., system_prompt=...)` 로 넘겨받기만 한다 — 분량 역산의 근거가 되는 머리말·
+파일명·경고 문구가 모두 잡 쪽에 있으므로, 프롬프트만 여기 떨어져 있으면 한쪽을 고칠 때
+다른 쪽을 같이 보게 되지 않는다.
+
+여기에 '기본값'을 두지 않는 것도 같은 이유의 연장이다. 기본값이 있으면 프롬프트를
+빠뜨린 잡이 조용히 **남의 잡 모양**으로 돌고 결과물을 봐야만 알아챌 수 있는데,
+인자를 필수로 두면 그 실수가 호출 즉시 `TypeError` 로 드러난다.
+
+반대로 나머지(명령 조립·모델/effort 해석·JSON 처리·`fix_bullets`)는 잡이 늘어도
+그대로라 여기서 공유한다. 잡마다 복사해 두면 한쪽만 고쳐지고 나머지가 조용히 어긋난다.
 
 모델/effort 해석 규칙과 실행 디렉터리는 스킬에서 **가져다 쓴다**(복사하지 않는다).
 별칭 표를 여기에 복사해두면 스킬 쪽과 조용히 어긋나, 같은 `.env` 값을 적었는데
@@ -39,43 +49,6 @@ from batch.config import load_batch_env
 # 음성 스킬의 기본 60초보다 훨씬 길다. 웹 검색을 여러 주제로 도는 잡이고, 사람이
 # 기다리고 있지 않으므로 지연보다 완주가 중요하다.
 DEFAULT_TIMEOUT = 300.0
-
-# 결과가 마크다운 문서에 그대로 들어가므로, 스킬과 달리 목록 표기를 **요구**한다.
-# 제목(#)을 금지하는 이유는 상위 문서(daily_briefing.render_document)가 주제별
-# 제목을 붙이기 때문이다 — 모델이 제목을 또 달면 계층이 두 겹으로 어긋난다.
-#
-# **분량 상한(항목 6개 · 항목당 200자)은 취향이 아니라 Discord 예산에서 역산한 값이고,
-# 그 역산은 "하루에 주제 하나"를 전제로 한다.** 결과 문서는 저장 직후 Discord 메시지
-# 본문으로 전송되는데(batch/discord_notify.py), 본문 상한이 2000자다:
-#     2000 − 머리말 90 − "## 주제" 제목 ~16 − 잘림 표시 9 = 항목에 쓸 수 있는 1885자
-#     항목 6개 × 203자("- " 와 줄바꿈 포함) ≈ 1218자 → 지시대로면 문서 전체 1324자
-# 모델이 지시를 44% 초과해 써도 잘리지 않는다. 상한을 더 조이지 않는 이유는 주제가
-# 하나뿐이라 예산을 나눠 쓸 상대가 없기 때문이고, 더 늘리지 않는 이유는 그 초과 여유가
-# 프롬프트 순응도에 대한 유일한 보험이기 때문이다.
-#
-# **주제를 2개 이상으로 늘리면 이 계산이 깨진다.** 그때는 항목 수와 길이를 주제 수로
-# 나눠 다시 잡아야 한다(주제 5개면 항목 3개 × 100자 수준). 파일은 온전히 남고 메시지만
-# 잘리므로 조용히 넘어가기 쉬운데, `daily_briefing.warn_if_too_long()` 이 그날 로그로
-# 알려준다.
-#
-# 잘림은 문서 뒤쪽에서 일어난다. 주제가 하나면 사라지는 것은 마지막 항목들이고,
-# 프롬프트가 "중요한 것부터"를 요구하므로 잃는 쪽은 항상 덜 중요한 항목이다.
-#
-# 출처를 URL 이 아니라 매체명으로 받는 이유도 같은 예산 문제다. URL 하나가 100자를 넘는
-# 일이 흔해서, 링크 여섯 개면 항목 두세 개 분량을 통째로 먹는다.
-#
-# 이 지시는 모델이 지켜 줄 때만 유효한 '최선 노력'이다. 실제로 지켜지는지는
-# `daily_briefing.warn_if_too_long()` 이 매 실행마다 로그로 알려준다.
-SYSTEM_PROMPT = (
-    "당신은 한국어 브리핑 작성자입니다. "
-    "주어진 주제에 대해 웹 검색으로 최신 정보를 확인한 뒤 한국어로 요약하세요. "
-    "'-' 로 시작하는 항목을 정확히 6개 쓰고, 각 항목은 공백 포함 200자 이내로 "
-    "한두 문장으로 쓰세요. 중요한 것부터 적으세요. "
-    "각 항목 끝에 출처를 매체명만 괄호로 덧붙이세요 (예: (연합뉴스)). URL 은 쓰지 마세요. "
-    "제목(#)은 넣지 마세요. 상위 문서가 주제별 제목을 붙입니다. "
-    "인사말·서론·맺음말 없이 항목만 출력하세요. "
-    "검색으로 확인되지 않은 내용은 쓰지 마세요."
-)
 
 # 어떤 모델/effort 로 돌았는지는 결과 품질을 해석할 때 필요하지만 매 주제마다 찍을
 # 필요는 없다. 프로세스당 한 번만 출력한다 (스킬의 _logged_options 와 같은 취지).
@@ -103,23 +76,14 @@ def fix_bullets(text):
     return re.sub(r"^-(?=[^\s\-\d])", "- ", text, flags=re.MULTILINE)
 
 
-def describe_options():
-    """현재 설정에서 해석된 (모델, effort) 문자열 쌍. 결과 문서 머리말에 적는다."""
-    load_batch_env()
-    model = resolve_model(os.environ.get("CLAUDE_CLI_MODEL", ""))
-    effort = resolve_effort(os.environ.get("CLAUDE_CLI_EFFORT", ""))
-    return model or "CLI 기본값", effort or "CLI 기본값"
-
-
-def build_command(system_prompt=None):
+def build_command(system_prompt):
     """`claude --print …` 명령줄을 조립한다.
 
-    `system_prompt` 를 주면 그것을 쓰고, 없으면 이 모듈의 `SYSTEM_PROMPT`(주제 요약용)
-    를 쓴다. 잡이 늘어나면 달라지는 것은 **결과물의 모양뿐**이라서(주제 요약이냐 커뮤니티
-    페이지 훑기냐) 프롬프트만 갈아 끼울 수 있게 열어 둔 것이다. 명령 조립·모델 해석·
-    JSON 처리·`fix_bullets` 는 잡이 늘어도 그대로이므로, 잡마다 이 함수를 복사해 두면
-    한쪽만 고쳐지고 나머지가 조용히 어긋난다 (모델 별칭 표를 스킬에서 import 하는 것과
-    같은 판단이다).
+    `system_prompt` 는 **필수 인자**다 — 기본값을 두지 않는 이유는 모듈 주석 참고
+    (프롬프트를 빠뜨린 잡이 남의 모양으로 조용히 도는 대신, 호출 즉시 `TypeError` 로
+    드러난다). 잡마다 달라지는 것은 그것뿐이고, 명령 조립·모델 해석·JSON 처리·
+    `fix_bullets` 는 잡이 늘어도 그대로라 여기 남는다 (모델 별칭 표를 스킬에서 import
+    하는 것과 같은 판단이다).
     """
     global _logged_options
 
@@ -142,7 +106,7 @@ def build_command(system_prompt=None):
         print(f"[System] claude CLI 모델: {model or 'CLI 기본값'} / "
               f"effort: {effort or 'CLI 기본값'}")
 
-    cmd += ["--append-system-prompt", system_prompt or SYSTEM_PROMPT]
+    cmd += ["--append-system-prompt", system_prompt]
 
     # 도구 허용 목록. 빈 값이면 도구 목록 자체를 비운다 — 플래그를 생략하면 도구는
     # 살아 있고 권한만 없어서, 모델이 호출했다가 런타임에 거부당한다
@@ -161,7 +125,7 @@ def build_command(system_prompt=None):
     return cmd
 
 
-def ask(question, timeout=None, system_prompt=None):
+def ask(question, system_prompt, timeout=None):
     """claude CLI 에 질문을 보내고 마크다운 그대로의 답변 문자열을 반환한다.
 
     실패는 예외로 올린다 (`subprocess.TimeoutExpired` 포함) — 호출자가 주제 단위로
@@ -171,7 +135,8 @@ def ask(question, timeout=None, system_prompt=None):
     오해받거나 긴 프롬프트가 인자 길이 제한에 걸리는 것을 피하려는 것으로,
     스킬과 `test-claude-cli.py` 가 쓰는 방식과 같다.
 
-    `system_prompt` 는 `build_command()` 로 그대로 넘어간다 (그쪽 주석 참고).
+    `system_prompt` 는 잡이 갖고 있는 자기 프롬프트이고, **필수**다. `build_command()`
+    로 그대로 넘어간다 (그쪽과 모듈 주석 참고).
     """
     load_batch_env()
 

@@ -79,9 +79,10 @@ flowchart TD
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
 | 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
 | 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
-| 배치: 설정 | `batch/config.py` | `load_batch_env()`, `read_topics()`, `output_dir()` |
-| 배치: claude 질의 | `batch/claude_query.py` | `ask()`, `build_command()`, `fix_bullets()` |
-| 배치: 정기 LLM 요약 | `batch/daily_briefing.py` | `main()`, `summarize_topic()`, `render_document()` |
+| 배치: 설정 | `batch/config.py` | `load_batch_env()`, `read_topics()`, `read_url()`, `output_dir()` |
+| 배치: claude 질의 (프롬프트는 잡이 넘김) | `batch/claude_query.py` | `ask()`, `build_command()`, `fix_bullets()` |
+| 배치: 정기 LLM 요약 | `batch/daily_briefing.py` | `SYSTEM_PROMPT`, `main()`, `summarize_topic()`, `render_document()` |
+| 배치: URL 브리핑 | `batch/url_briefing.py` | `SYSTEM_PROMPT`, `main()`, `summarize_url()`, `render_document()`, `site_label()` |
 | 배치: Discord 알림 (공용) | `batch/discord_notify.py` | `notify()`, `send()`, `truncate()`, `is_enabled()` |
 
 > 모델(Wake Word / STT / TTS)은 import 시점이 아니라 `main()` 안에서 **한 번만** 로드됩니다. 덕분에 다른 스크립트가 `agent` 하위 모듈을 개별 import 해도 전체 파이프라인이 딸려오지 않습니다.
@@ -266,13 +267,19 @@ PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마�
 
 깨끗한 wav 로 오프라인 벤치마크를 하려면 `text_to_wav.py` 로 한국어 샘플을 만들고 `agent/stt.py` 의 `transcribe_pcm` 을 직접 호출해 비교하면 됩니다.
 
-## 배치 잡 (정기 LLM 요약)
-음성 턴 안에서 하기엔 너무 느리거나, 부르지 않아도 돌아야 하는 작업은 `batch/` 에 두고 cron 으로 돌립니다. 현재 잡은 하나입니다 — **정기 LLM 요약**(`batch/daily_briefing.py`): 관심 주제 목록을 claude CLI 의 웹 검색으로 훑어 날짜별 마크다운으로 남깁니다. 자세한 내용은 [`batch/README.md`](batch/README.md).
+## 배치 잡
+음성 턴 안에서 하기엔 너무 느리거나, 부르지 않아도 돌아야 하는 작업은 `batch/` 에 두고 cron 으로 돌립니다. 현재 잡은 둘입니다.
+
+- **정기 LLM 요약**(`batch/daily_briefing.py`): 관심 주제 목록을 claude CLI 의 웹 검색으로 훑어 `batch/output/YYYY-MM-DD.md` 로 남깁니다.
+- **URL 브리핑**(`batch/url_briefing.py`): 커뮤니티 사이트 한 곳을 `WebFetch` 로 직접 열어 지금 올라온 글들을 `batch/output/url-YYYY-MM-DD.md` 로 남깁니다.
+
+두 잡의 결과 모양은 같습니다 — 개요 한두 문장 + 항목 6개, 항목의 제목은 **Discord 마스크 링크**(`[__"제목"__](<주소>)`)로 감쌉니다. 알림이 같은 채널에 나란히 올라오므로 읽는 쪽이 규칙을 하나만 익히면 되게 맞춘 것입니다. 자세한 내용은 [`batch/README.md`](batch/README.md).
 
 ```bash
 # 저장소 루트에서
-cp batch/.env.example batch/.env      # 최초 1회: 주제·모델 설정 (루트 .env 와 별개)
+cp batch/.env.example batch/.env      # 최초 1회: 주제·URL·모델 설정 (루트 .env 와 별개)
 ./bin/python -m batch.daily_briefing
+./bin/python -m batch.url_briefing    # URL 브리핑 (옵션은 같고 --url / --name 이 추가)
 ```
 ```
 [System] 2026-07-30 브리핑 시작 — 주제 1개
@@ -283,7 +290,8 @@ cp batch/.env.example batch/.env      # 최초 1회: 주제·모델 설정 (루�
 [System] 저장: batch/output/2026-07-30.md
 [System] 완료 (26.6초) — 주제 1개 모두 성공
 ```
-- **요약 분량(항목 6개 · 항목당 200자 · 출처는 매체명, URL 금지)은 Discord 메시지 예산에서 역산한 값이고, 주제를 하루 하나만 돌린다는 전제입니다.** 본문 상한 2000자에서 머리말·제목·잘림 표시를 빼면 항목에 1,885자를 쓸 수 있고, 지시대로면 문서가 1,324자라 **모델이 44% 더 써도** 잘리지 않습니다. 주제를 2개 이상으로 늘리면 이 계산이 깨져 뒤 주제가 메시지에서 빠지므로(파일에는 남음), 그때는 `batch/claude_query.py` 의 분량 지시를 주제 수로 나눠 다시 잡으세요. 상한을 넘긴 날에는 실행 로그에 `[경고] 문서가 Discord 본문 상한을 넘었습니다: …` 가 남습니다.
+- **요약 분량(개요 150자 + 항목 6개 · 항목당 설명 80자)은 Discord 메시지 예산에서 역산한 값이고, 주제를 하루 하나만 돌린다는 전제입니다.** 본문 상한 2000자에서 머리말·잘림 표시를 빼면 1,921자를 쓸 수 있고, 지시대로면 문서가 약 1,360자라 **모델이 47% 더 써도** 잘리지 않습니다. 주제를 2개 이상으로 늘리면 이 계산이 깨져 뒤 주제가 메시지에서 빠지므로(파일에는 남음), 주제별 알림이 필요하면 `--topic` 을 단 cron 줄을 나누는 편이 낫습니다. 상한을 넘긴 날에는 실행 로그에 `[경고] 문서가 Discord 본문 상한을 넘었습니다: …` 가 남습니다.
+- 출처는 매체명 대신 **항목 제목에 걸린 링크**가 대신합니다. 제목을 누르면 원문으로 갑니다(`< >` 로 감싸 임베드 카드는 뜨지 않습니다). 결과 문서에 모델/effort 는 적히지 않고, 그 값은 실행 로그의 `[System] claude CLI 모델: …` 한 줄에 남습니다.
 - `claude 턴 수` 는 검색을 실제로 썼는지 보는 가장 싼 지표입니다 — `1` 이면 모델이 기억으로만 답한 것이니, 최신 정보를 기대했다면 `CLAUDE_CLI_ALLOWED_TOOLS` 를 확인하세요.
 - 소요 시간은 주제 수와 `CLAUDE_CLI_EFFORT` 에 비례합니다 (위는 주제 1개 · `effort=low` 측정치).
 

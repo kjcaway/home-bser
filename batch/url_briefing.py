@@ -55,8 +55,10 @@ FILENAME_PREFIX = "url-"
 # 보고서가 통째로 모델의 기억이 된다.
 REQUIRED_TOOL = "WebFetch"
 
-# 커뮤니티 페이지 훑기용 시스템 프롬프트. `claude_query.SYSTEM_PROMPT`(주제 요약용)
-# 대신 `ask(system_prompt=...)` 로 넘긴다.
+# 커뮤니티 페이지 훑기용 시스템 프롬프트. `claude_query.ask(system_prompt=...)` 로
+# 넘긴다 — 공용 모듈에 기본값을 두지 않는 이유는 그쪽 모듈 주석 참고 (프롬프트는
+# 결과물의 모양이고, 그 모양이 곧 잡의 정체라 잡 파일이 갖는다). 주제 요약 쪽 짝은
+# `daily_briefing.SYSTEM_PROMPT`.
 #
 # 항목의 글 제목은 **Discord 마스크 링크**(`[__"제목"__](<주소>)`)로 감싼다. 형식이 셋 다
 # 이유가 있다:
