@@ -1,8 +1,8 @@
 """Discord 웹훅으로 텍스트 메시지를 보내는 배치 공용 모듈.
 
     ./bin/python -m batch.discord_notify "테스트 메시지"
-    ./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md
-    ./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md --dry-run
+    ./bin/python -m batch.discord_notify --file batch/output/daily_briefing/2026-07-30-07.md
+    ./bin/python -m batch.discord_notify --file batch/output/url_briefing/2026-07-30-07.md --dry-run
 
 웹훅 URL 은 `batch/.env` 의 `DISCORD_WEBHOOK_URL` 에서 읽는다 (루트 `.env` 가 아니다 —
 `batch/config.py` 의 `load_batch_env()` 주석 참고).
@@ -228,7 +228,8 @@ def parse_args():
         help="보낼 텍스트. --file 과 함께 쓸 수 없다.")
     parser.add_argument(
         "--file", metavar="경로",
-        help="이 파일의 내용을 메시지 본문으로 보낸다 (예: batch/output/2026-07-30.md)")
+        help="이 파일의 내용을 메시지 본문으로 보낸다 "
+             "(예: batch/output/daily_briefing/2026-07-30-07.md)")
     parser.add_argument(
         "--username", metavar="이름",
         help="이 메시지에만 쓸 표시 이름 (기본: .env 의 DISCORD_USERNAME)")

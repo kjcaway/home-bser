@@ -1,4 +1,4 @@
-"""URL 요약 배치 잡 — 커뮤니티 사이트 한 곳을 훑어 날짜별 마크다운 보고서로 남긴다.
+"""URL 요약 배치 잡 — 커뮤니티 사이트 한 곳을 훑어 실행 시각별 마크다운 보고서로 남긴다.
 
     ./bin/python -m batch.url_briefing                              # batch/.env 의 URL
     ./bin/python -m batch.url_briefing --url https://example.com    # URL 직접 지정
@@ -9,9 +9,9 @@
 
 대상 URL 은 `batch/.env` 의 `URL_BRIEFING_URL`, 보고서에 표시할 사이트 이름은
 `URL_BRIEFING_NAME`(비우면 호스트명), 저장 위치는 `BRIEFING_OUTPUT_DIR`
-(기본 `batch/output/`)에서 읽는다. 결과 파일명은 `url-YYYY-MM-DD.md` 이고, 같은 날 다시
-돌리면 **덮어쓴다** (`daily_briefing` 의 `YYYY-MM-DD.md` 와 접두어로만 갈린다 — 두 잡이
-같은 디렉터리를 쓰면서 겹치지 않는 이유가 이 접두어다).
+(기본 `batch/output/`)에서 읽는다. 결과는 **잡 이름 디렉터리 아래 실행 시각으로**
+남는다 — `batch/output/url_briefing/YYYY-MM-DD-HH.md`. 같은 시간대에 다시 돌리면
+덮어쓰고, 다른 시각에 돌리면 파일이 따로 쌓인다 (`batch/config.output_path()` 참고).
 
 **URL 은 하나만 받는다.** 여러 개를 받지 않는 것은 게을러서가 아니라 분량 때문이다.
 요약 분량이 Discord 본문 2000자를 이 보고서 하나가 다 쓴다고 보고 역산돼 있어
@@ -41,15 +41,15 @@ from urllib.parse import urlparse
 
 from agent.skills.claude_p import DEFAULT_ALLOWED_TOOLS, is_enabled
 from batch import claude_query, discord_notify
-from batch.config import load_batch_env, output_dir, read_site_name, read_url
+from batch.config import load_batch_env, output_path, read_site_name, read_url
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
 EXIT_PARTIAL = 2
 
-# 결과 파일명 접두어. `daily_briefing` 의 `YYYY-MM-DD.md` 와 같은 디렉터리에 나란히
-# 저장되므로, 이 접두어가 두 잡의 그날 결과가 서로를 덮어쓰지 않게 하는 유일한 장치다.
-FILENAME_PREFIX = "url-"
+# 결과를 담을 하위 디렉터리 이름. 모듈 이름과 같게 둔다 — 로그에 찍힌 잡 이름
+# (`-m batch.url_briefing`)과 결과가 쌓이는 자리를 따로 외울 필요가 없다.
+JOB_NAME = "url_briefing"
 
 # 대상 페이지를 실제로 여는 것이 이 잡의 존재 이유라, 이 도구가 허용 목록에 없으면
 # 보고서가 통째로 모델의 기억이 된다.
@@ -127,7 +127,8 @@ def parse_args():
              "URL_BRIEFING_NAME, 그것도 없으면 호스트명)")
     parser.add_argument(
         "--output", metavar="경로",
-        help="결과를 저장할 파일 경로 (기본: <BRIEFING_OUTPUT_DIR>/url-YYYY-MM-DD.md)")
+        help="결과를 저장할 파일 경로 "
+             "(기본: <BRIEFING_OUTPUT_DIR>/url_briefing/YYYY-MM-DD-HH.md)")
     parser.add_argument(
         "--stdout", action="store_true",
         help="파일로 저장하지 않고 표준출력으로 내보낸다 (cron 메일·디버깅용). "
@@ -339,7 +340,10 @@ def main():
     warn_if_tool_missing()
 
     name = (args.name or read_site_name()).strip()
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 실행 시각을 한 번만 읽어 문서의 날짜와 결과 파일명이 같은 값에서 나오게 한다
+    # (자정·정시를 걸친 실행에서 둘이 어긋나지 않도록 — `output_path()` 주석 참고).
+    run_at = datetime.now()
+    today = run_at.strftime("%Y-%m-%d")
     print(f"[System] {today} URL 브리핑 시작 — 대상: {site_label(name, url)} ({url})")
 
     started = time.monotonic()
@@ -355,7 +359,7 @@ def main():
         if discord_notify.is_enabled():
             print("[System] --stdout 이므로 Discord 전송을 건너뜁니다.")
     else:
-        path = (output_dir() / f"{FILENAME_PREFIX}{today}.md" if args.output is None
+        path = (output_path(JOB_NAME, run_at) if args.output is None
                 else Path(args.output))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(document, encoding="utf-8")

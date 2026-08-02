@@ -114,12 +114,12 @@ Run batch jobs (from the repo root; see "Batch jobs" below):
 
 ```bash
 cp batch/.env.example batch/.env                 # 최초 1회 (루트 .env 와 별개)
-python -m batch.daily_briefing                   # 정기 LLM 요약 → batch/output/YYYY-MM-DD.md
+python -m batch.daily_briefing                   # 정기 LLM 요약 → batch/output/daily_briefing/YYYY-MM-DD-HH.md
 python -m batch.daily_briefing --topic "AI 동향"   # 주제 하나만 (반복 지정 가능)
 python -m batch.daily_briefing --stdout          # 파일 저장 없이 출력만
 python -m batch.daily_briefing --no-notify       # 저장만, Discord 전송 생략
 
-python -m batch.url_briefing                     # URL 브리핑 → batch/output/url-YYYY-MM-DD.md
+python -m batch.url_briefing                     # URL 브리핑 → batch/output/url_briefing/YYYY-MM-DD-HH.md
 python -m batch.url_briefing --url https://…/board   # .env 의 URL_BRIEFING_URL 대신 이 주소
 python -m batch.url_briefing --stdout            # 파일 저장 없이 출력만
 python -m batch.url_briefing --no-notify         # 저장만, Discord 전송 생략
@@ -127,7 +127,7 @@ python -m batch.url_briefing --no-notify         # 저장만, Discord 전송 생
 ./batch/run.sh                                   # cron 래퍼 (cwd·PATH·로그 처리, 기본 daily_briefing)
 ./batch/run.sh url_briefing                      # 잡 이름을 첫 인자로 (래퍼 수정 불필요)
 
-python -m batch.discord_notify --file batch/output/2026-07-30.md   # 결과 파일을 Discord 로 전송
+python -m batch.discord_notify --file batch/output/daily_briefing/2026-07-30-07.md   # 결과 파일을 Discord 로 전송
 python -m batch.discord_notify "테스트 메시지"                       # 텍스트 직접 전송
 python -m batch.discord_notify --file … --dry-run                  # 보내지 않고 잘린 본문만 확인
 ```
@@ -172,10 +172,10 @@ The code is split into an `agent/` package with one module per pipeline stage �
   - `agent/skills/claude_p.py` — Claude Code CLI(`claude --print`) 질의 (catch-all). `is_enabled()`, `resolve_model()` / `resolve_effort()` (`.env` 값 → CLI 인자 해석), `build_command()`, `ask(question, cancel_event=None)` (`Popen` + 워커 스레드, 취소 시 프로세스 kill), `strip_markdown()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (Claude Code CLI)" 참고). 파일명이 `claude-p.py` 가 아닌 이유는 하이픈이 들어가면 `from agent.skills import claude-p` 가 문법 오류라 스킬 등록이 불가능하기 때문.
   - `agent/skills/hermes_api.py` — hermes gateway LLM 질의 (catch-all). `is_enabled()`, `ask(question, cancel_event=None)` (워커 스레드, 취소 시 결과 폐기), `strip_think()`; 응답 지연 시 `BackgroundSound` 로 대기음 재생 + 호출어 감시 (아래 "LLM stage (hermes gateway)" 참고).
 - `batch/` — 정기 실행(배치) 잡. 모듈 하나가 잡 하나이며, 오디오도 모델도 건드리지 않는다 (아래 "Batch jobs" 참고):
-  - `batch/config.py` — `BATCH_DIR`, `DEFAULT_OUTPUT_DIR`, `load_batch_env()` (배치 전용 `.env` 적재 — 루트 `.env` 와의 분리를 담당하는 유일한 장치), `read_topics()`, `read_url()` (`URL_BRIEFING_URL`, 하나만), `read_site_name()` (`URL_BRIEFING_NAME`, 링크 라벨용), `output_dir()` (모든 잡이 공유 — 충돌 회피는 파일명 접두어 쪽).
+  - `batch/config.py` — `BATCH_DIR`, `DEFAULT_OUTPUT_DIR`, `FILENAME_TIME_FORMAT`, `load_batch_env()` (배치 전용 `.env` 적재 — 루트 `.env` 와의 분리를 담당하는 유일한 장치), `read_topics()`, `read_url()` (`URL_BRIEFING_URL`, 하나만), `read_site_name()` (`URL_BRIEFING_NAME`, 링크 라벨용), `output_dir()` (모든 잡이 공유하는 **뿌리** 디렉터리), `output_path(job_name, when)` (그 아래 `<잡 이름>/YYYY-MM-DD-HH.md` — 잡 사이의 충돌 회피가 여기에 있다).
   - `batch/claude_query.py` — 배치용 claude CLI 질의: `build_command(system_prompt)`, `ask(question, system_prompt, timeout=None)` (`subprocess.run`, 기본 300초), `fix_bullets()`. 모델/effort 해석과 실행 디렉터리는 `claude_p` 에서 import 한다. **시스템 프롬프트는 여기 없다** — 잡 모듈이 각자 갖고 인자로 넘기며, 기본값을 두지 않아 빠뜨리면 `TypeError` 로 즉시 드러난다 (아래 참고).
-  - `batch/daily_briefing.py` — 정기 LLM 요약 잡: `main()`, `parse_args()`, `build_prompt()`, `summarize_topic()`, `render_document()`, `warn_if_too_long()` (Discord 예산 초과 경고), `notify_document()` (저장 직후 Discord 전송, 실패 시 `True`). 자체 `SYSTEM_PROMPT`(주제 요약용, 분량 역산 근거가 그 주석에 있다)를 `claude_query.ask(system_prompt=…)` 로 넘긴다.
-  - `batch/url_briefing.py` — URL 브리핑 잡 (커뮤니티 사이트 하나를 훑어 요약): `main()`, `parse_args()`, `validate_url()`, `warn_if_tool_missing()` (`WebFetch` 누락 경고), `build_prompt()`, `summarize_url()`, `site_label()` (대상 링크 라벨 — 이름 없으면 호스트명, 대괄호 제거), `render_document()`, `warn_if_too_long()`, `notify_document()`. 자체 `SYSTEM_PROMPT` 를 `claude_query.ask(system_prompt=…)` 로 넘긴다. 파일명 접두어는 `FILENAME_PREFIX`(`url-`).
+  - `batch/daily_briefing.py` — 정기 LLM 요약 잡: `main()`, `parse_args()`, `build_prompt()`, `summarize_topic()`, `render_document()`, `warn_if_too_long()` (Discord 예산 초과 경고), `notify_document()` (저장 직후 Discord 전송, 실패 시 `True`). 자체 `SYSTEM_PROMPT`(주제 요약용, 분량 역산 근거가 그 주석에 있다)를 `claude_query.ask(system_prompt=…)` 로 넘긴다. 결과 디렉터리 이름은 `JOB_NAME`(`daily_briefing`).
+  - `batch/url_briefing.py` — URL 브리핑 잡 (커뮤니티 사이트 하나를 훑어 요약): `main()`, `parse_args()`, `validate_url()`, `warn_if_tool_missing()` (`WebFetch` 누락 경고), `build_prompt()`, `summarize_url()`, `site_label()` (대상 링크 라벨 — 이름 없으면 호스트명, 대괄호 제거), `render_document()`, `warn_if_too_long()`, `notify_document()`. 자체 `SYSTEM_PROMPT` 를 `claude_query.ask(system_prompt=…)` 로 넘긴다. 결과 디렉터리 이름은 `JOB_NAME`(`url_briefing`).
   - `batch/discord_notify.py` — Discord 웹훅 전송. **잡이 아니라 잡들이 가져다 쓰는 공용 부품**이다: `webhook_url()` / `is_enabled()`, `content_length()` / `truncate()`, `send()` (실패는 예외), `notify()` (실패를 삼키고 bool), `main()` (단독 실행 CLI). `agent/` 는 물론 다른 배치 모듈도 import 하지 않는 잎(leaf)이라 어느 잡에서든 끌어다 쓸 수 있다 (아래 "Discord 알림" 참고).
   - `batch/run.sh` — cron 래퍼 (cwd → 저장소 루트, PATH 보강, `batch/logs/` 로 로깅). Python 이 아니므로 코드 규칙과 무관.
 
@@ -337,12 +337,14 @@ Config keys in `.env`: `CLAUDE_CLI_ENABLED`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFF
 
 ### Batch jobs (`batch/`)
 
-Work that is too slow for a voice turn, or that should run without anyone asking, lives in `batch/` and runs from cron: `python -m batch.<잡이름>` from the repo root. There are two jobs, both writing one markdown file per day (overwritten on re-run) and both notifying Discord after the save. Details and cron setup: `batch/README.md`.
+Work that is too slow for a voice turn, or that should run without anyone asking, lives in `batch/` and runs from cron: `python -m batch.<잡이름>` from the repo root. There are two jobs, both writing one markdown file per run (to the hour — see below) and both notifying Discord after the save. Details and cron setup: `batch/README.md`.
 
-- **정기 LLM 요약** (`batch/daily_briefing.py`) — walks a topic list, asks the Claude Code CLI to summarize each with web search → `batch/output/YYYY-MM-DD.md`.
-- **URL 브리핑** (`batch/url_briefing.py`) — opens one community site with `WebFetch`, skims what is posted there right now, and writes an overview plus six items → `batch/output/url-YYYY-MM-DD.md`.
+- **정기 LLM 요약** (`batch/daily_briefing.py`) — walks a topic list, asks the Claude Code CLI to summarize each with web search → `batch/output/daily_briefing/YYYY-MM-DD-HH.md`.
+- **URL 브리핑** (`batch/url_briefing.py`) — opens one community site with `WebFetch`, skims what is posted there right now, and writes an overview plus six items → `batch/output/url_briefing/YYYY-MM-DD-HH.md`.
 
-**The output directory is shared; the filename prefix is what keeps the two apart.** Both read `BRIEFING_OUTPUT_DIR`, and only `FILENAME_PREFIX` (`url-`) stops the same day's results from overwriting each other — cheaper than a per-job directory key, but it means a new job must pick a prefix.
+**One config key, one directory per job: `output_dir()` is only the root, and `output_path(job_name, when)` picks the file.** Both jobs read the same `BRIEFING_OUTPUT_DIR` — adding a key per job would be a setting nobody wants to set — but each writes under its own `JOB_NAME` directory, so a new job picks a name rather than a filename prefix. The prefix (`url-`) it replaced only worked while one run overwrote the last; once files accumulate, a shared directory means reading one job's results requires eyeballing past another's.
+
+**The stamp stops at the hour, and both the stamp and the document's date come from one `datetime.now()`.** Minutes and seconds would preserve every re-run after a failure, which is exactly the pile nobody wants; at hour granularity a retry overwrites, while cron lines scheduled at different hours keep separate files. And the timestamp is read once in `main()` (`run_at`) rather than again at save time, because the header date and the prompt's "오늘" already come from it — a run crossing midnight would otherwise file `# 2026-08-02 브리핑` as `2026-08-03-00.md`.
 
 **`python batch/daily_briefing.py` does not work, and that is why `-m` is the documented form.** Running a file inside the package puts `sys.path[0]` at `batch/`, so `import agent` fails; `-m` puts the cwd (repo root) on the path instead. The same cwd matters for a second reason — `agent/config.py`'s file paths are relative (`soundfile/…`) and the default output dir is repo-relative — so `batch/run.sh` `cd`s to the root before doing anything.
 
@@ -399,7 +401,7 @@ Batch results are delivered to a Discord channel through a webhook. This is **no
 
 - **Message body, not an attachment** — so Discord's 2000-character `content` limit is the binding constraint, and `truncate()` cuts to fit and appends `(...생략)`. It cuts at a **line boundary** (a markdown bullet split mid-line reads as garbage; losing one whole line does not), falling back to a character cut when the last newline would throw away more than half the budget — otherwise a single-paragraph document would lose almost everything.
 - **Length is measured in UTF-16 code units** (`content_length()`), not `len()`. Python counts code points but a non-BMP character (emoji) costs 2 in Discord's counter, so a body that measures 2000 by `len()` can be rejected with a 400. Counting the larger way can only make the message shorter.
-- **Truncating, not splitting into several messages.** The full text stays in the source file (`batch/output/YYYY-MM-DD.md`); the message is an alert. Several messages per run from the same job is the failure mode that makes a channel unreadable, which defeats the alert.
+- **Truncating, not splitting into several messages.** The full text stays in the source file (`batch/output/<잡 이름>/YYYY-MM-DD-HH.md`); the message is an alert. Several messages per run from the same job is the failure mode that makes a channel unreadable, which defeats the alert.
 - **The webhook URL is the switch** (`is_enabled()` = URL present), with no separate `DISCORD_ENABLED`. Unlike `CLAUDE_CLI_ENABLED` — where "installed ⇒ on" would silently route utterances to the cloud — there is no state here where sending is on but there is nowhere to send. Blank the URL to turn it off. The URL is also **never printed**: it is itself the credential, so anyone who reads it out of a log can post to that channel.
 - **`send()` raises, `notify()` doesn't.** Jobs call `notify()`: a failed notification must not undo a briefing that is already written to disk, and a line in the cron log is enough. `send()` is for a caller that wants to decide for itself. A 429 is retried **once** after `retry_after` (capped by `MAX_RETRY_WAIT`, 5 s) — a cron job should not hang for minutes on one alert.
 

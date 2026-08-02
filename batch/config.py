@@ -15,6 +15,12 @@ BATCH_DIR = Path(__file__).resolve().parent
 # 요약 결과 기본 저장 위치. BRIEFING_OUTPUT_DIR 로 덮어쓸 수 있다.
 DEFAULT_OUTPUT_DIR = BATCH_DIR / "output"
 
+# 결과 파일명의 시각 표기. 날짜에 **시(hour)까지** 붙이는 이유는 같은 잡을 하루에 여러 번
+# 돌리는 쓰임(시간대별 cron 줄) 때문이다 — 날짜뿐이면 그날의 마지막 실행만 남는다.
+# 분·초까지 내려가지 않는 것은 의도적이다: 같은 시간대의 재실행은 덮어쓰게 두어야
+# 실패 후 다시 돌린 결과가 옆에 쌓이지 않는다.
+FILENAME_TIME_FORMAT = "%Y-%m-%d-%H"
+
 
 def load_batch_env():
     """`batch/.env` 를 `os.environ` 에 적재한다. 배치 모듈의 **모든 진입점에서** 호출한다.
@@ -69,11 +75,10 @@ def read_site_name():
 
 
 def output_dir():
-    """요약 결과를 저장할 디렉터리.
+    """요약 결과를 저장할 **뿌리** 디렉터리. 잡별 하위 디렉터리는 `output_path()` 가 만든다.
 
-    잡별로 나누지 않고 `BRIEFING_OUTPUT_DIR` 하나를 모든 잡이 함께 쓴다. 같은 날 여러
-    잡이 돌아도 겹치지 않는 것은 파일명 쪽에서 보장한다 (`YYYY-MM-DD.md` vs.
-    `url-YYYY-MM-DD.md`) — 잡마다 디렉터리 키를 늘리는 것보다 접두어 하나가 싸다.
+    설정 키는 잡마다 늘리지 않고 `BRIEFING_OUTPUT_DIR` 하나를 모든 잡이 함께 쓴다.
+    잡끼리 겹치지 않게 하는 것은 그 아래 잡 이름 디렉터리 쪽이다.
 
     `BRIEFING_OUTPUT_DIR` 에 상대경로를 적으면 **cwd 기준**이다. cron 은 임의의 cwd 로
     돌기 때문에 `batch/run.sh` 가 저장소 루트로 이동한 뒤 실행한다.
@@ -81,3 +86,20 @@ def output_dir():
     load_batch_env()
     raw = os.environ.get("BRIEFING_OUTPUT_DIR", "").strip()
     return Path(raw).expanduser() if raw else DEFAULT_OUTPUT_DIR
+
+
+def output_path(job_name, when):
+    """잡 이름과 실행 시각으로 결과 파일 경로를 만든다 — `<뿌리>/<잡 이름>/YYYY-MM-DD-HH.md`.
+
+    **잡을 가르는 것이 파일명 접두어에서 디렉터리로 바뀌었다.** 접두어(`url-`)는 한
+    디렉터리에 두 잡의 결과가 섞여 있어야 성립하는 장치였는데, 실행마다 파일이 쌓이기
+    시작하면 그 섞임 자체가 문제가 된다 — 잡 하나의 결과만 보려 해도 남의 잡 파일을
+    눈으로 걸러야 한다. 디렉터리로 가르면 새 잡은 이름만 정하면 되고, 접두어를 고르다
+    실수로 겹칠 여지도 없다.
+
+    **`when` 을 인자로 받고 여기서 `datetime.now()` 를 부르지 않는 이유**는 잡이 실행
+    시각을 이미 갖고 있기 때문이다. 문서 머리말의 날짜와 프롬프트의 '오늘'이 그 값에서
+    나오는데, 저장 시점에 시각을 다시 읽으면 자정이나 정시를 걸친 실행에서 파일명과
+    문서 내용의 시각이 어긋난다 (`# 2026-08-02 브리핑` 이 `2026-08-03-00.md` 에 담기는 식).
+    """
+    return output_dir() / job_name / f"{when.strftime(FILENAME_TIME_FORMAT)}.md"

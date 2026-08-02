@@ -5,13 +5,14 @@
 
 ## 개요
 
-두 잡 모두 claude CLI 로 요약을 만들어 **날짜별 마크다운 파일**로 저장하고, 웹훅이
-설정돼 있으면 그 파일을 **Discord 로 전송**합니다. 같은 날 다시 돌리면 파일을 덮어씁니다.
+두 잡 모두 claude CLI 로 요약을 만들어 **잡 이름 디렉터리 아래 실행 시각으로** 저장하고,
+웹훅이 설정돼 있으면 그 파일을 **Discord 로 전송**합니다. 파일명은 시(hour)까지라, 같은
+시간대에 다시 돌리면 덮어쓰고 다른 시각에 돌리면 파일이 따로 쌓입니다.
 
 | 잡 | 모듈 | 하는 일 | 결과 파일 |
 | --- | --- | --- | --- |
-| 정기 LLM 요약 | `batch/daily_briefing.py` | 관심 **주제**(`BRIEFING_TOPICS`)를 웹 검색으로 훑어 주제별로 요약 | `batch/output/YYYY-MM-DD.md` |
-| URL 브리핑 | `batch/url_briefing.py` | 커뮤니티 **사이트 한 곳**(`URL_BRIEFING_URL`)을 직접 열어 지금 올라온 글들을 요약 | `batch/output/url-YYYY-MM-DD.md` |
+| 정기 LLM 요약 | `batch/daily_briefing.py` | 관심 **주제**(`BRIEFING_TOPICS`)를 웹 검색으로 훑어 주제별로 요약 | `batch/output/daily_briefing/YYYY-MM-DD-HH.md` |
+| URL 브리핑 | `batch/url_briefing.py` | 커뮤니티 **사이트 한 곳**(`URL_BRIEFING_URL`)을 직접 열어 지금 올라온 글들을 요약 | `batch/output/url_briefing/YYYY-MM-DD-HH.md` |
 
 **두 잡의 결과 모양은 같습니다** — 개요 한두 문장 + 항목 6개, 항목의 제목은 **Discord
 마스크 링크**(`[__"제목"__](<주소>)`)로 감쌉니다. 긴 주소를 감추고, `< >` 로 링크
@@ -100,7 +101,7 @@ $EDITOR batch/.env
 | `CLAUDE_CLI_TIMEOUT` | 호출당 제한 시간(초). 기본 300 |
 | `CLAUDE_CLI_ALLOWED_TOOLS` | 허용 도구. `WebSearch,WebFetch` |
 | `BRIEFING_TOPICS` | 정기 요약 주제(쉼표 구분) |
-| `BRIEFING_OUTPUT_DIR` | 결과 디렉터리(기본 `batch/output`). 모든 잡이 공유 |
+| `BRIEFING_OUTPUT_DIR` | 결과가 쌓이는 **뿌리** 디렉터리(기본 `batch/output`). 모든 잡이 공유하고, 그 아래 잡 이름 디렉터리가 생깁니다 |
 | `URL_BRIEFING_URL` / `URL_BRIEFING_NAME` | URL 브리핑 대상과 링크 라벨(비우면 호스트명) |
 | `DISCORD_WEBHOOK_URL` | **비우면 전송을 건너뜁니다**(별도 on/off 키 없음). URL 자체가 인증 수단이라 로그에 절대 출력하지 않습니다 |
 | `DISCORD_USERNAME` / `DISCORD_TIMEOUT` | 표시 이름 / 전송 제한 시간(기본 15초) |
@@ -129,8 +130,8 @@ $EDITOR batch/.env
 
 ```bash
 ./bin/python -m batch.discord_notify "테스트 메시지"
-./bin/python -m batch.discord_notify --file batch/output/2026-08-01.md
-./bin/python -m batch.discord_notify --file batch/output/2026-08-01.md --dry-run   # 보내지 않고 본문만
+./bin/python -m batch.discord_notify --file batch/output/daily_briefing/2026-08-01-07.md
+./bin/python -m batch.discord_notify --file batch/output/url_briefing/2026-08-01-07.md --dry-run   # 보내지 않고 본문만
 ```
 
 > **`python batch/daily_briefing.py` 는 쓰지 않습니다.** 그렇게 부르면 `sys.path[0]` 이
@@ -146,8 +147,10 @@ $EDITOR batch/.env
    `claude_query.ask(prompt, system_prompt=SYSTEM_PROMPT)` 로 넘길 것 — 명령 조립·모델
    해석·JSON 처리는 공유합니다. `system_prompt` 는 **필수 인자**입니다(기본값 없음).
    빠뜨리면 남의 잡 모양으로 조용히 도는 대신 `TypeError` 로 바로 멈춥니다.
-3. 결과 파일명에 **잡을 알아볼 접두어**를 붙일 것 (출력 디렉터리를 모든 잡이 공유하므로,
-   같은 날 도는 잡끼리 겹치지 않게 하는 것이 접두어뿐입니다).
+3. **`JOB_NAME` 상수를 두고** 저장 경로를 `config.output_path(JOB_NAME, run_at)` 로 만들 것
+   (그 이름이 곧 결과 디렉터리라, 잡끼리 겹치지 않게 하는 것이 이 이름입니다). 모듈 이름과
+   같게 두면 로그의 잡 이름과 결과가 쌓이는 자리가 일치합니다. `run_at` 은 `main()` 에서
+   `datetime.now()` 를 **한 번만** 읽은 값이어야 문서의 날짜와 파일명이 어긋나지 않습니다.
 4. 알림이 필요하면 `discord_notify.notify(text)` 한 줄. 웹훅이 없으면 조용히 건너뜁니다.
 
 ## 2. `batch/run.sh` 로 실행
@@ -244,9 +247,9 @@ tail -f batch/logs/$(date +%F).log
   `>> log 2>&1` 을 덧붙이면 `run.sh` 의 로그와 둘로 갈립니다.
 - **등록 직후 한 번은 직접 돌려보세요.** claude CLI 는 로그인 인증을 쓰기 때문에, 대화형
   셸에서는 되던 것이 cron 사용자 환경에서는 인증을 못 찾아 실패할 수 있습니다.
-- **결과 파일은 하루에 하나씩 덮어씁니다.** 같은 잡을 하루에 여러 번 돌리면 파일은 마지막
-  것만 남습니다(Discord 알림은 실행마다 나갑니다). 둘 다 남기려면 `--output` 으로 경로를
-  가르세요.
+- **결과 파일은 한 시간에 하나씩 덮어씁니다.** 같은 잡을 같은 시간대에 여러 번 돌리면
+  파일은 마지막 것만 남습니다(Discord 알림은 실행마다 나갑니다). 다른 시각의 실행은 파일이
+  따로 쌓이고, 같은 시간대의 실행을 둘 다 남기려면 `--output` 으로 경로를 가르세요.
 - **Discord 본문 2000자를 넘으면 뒤쪽이 잘립니다.** 로그에 `[경고] 문서가 Discord 본문
   상한을 넘었습니다` 로 남고, 전문은 원본 파일에 그대로 있습니다.
 - **`URL_BRIEFING_URL` 에는 스킴(`https://`)을 꼭 붙이고, 허용 도구를 비우지 마세요.**

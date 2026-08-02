@@ -79,7 +79,7 @@ flowchart TD
 | 스킬: 타이머 | `agent/skills/timer.py` | `handle()`, `check_timer_intent()` |
 | 스킬: LLM · Claude CLI (catch-all) | `agent/skills/claude_p.py` | `handle()`, `ask()`, `is_enabled()`, `build_command()` |
 | 스킬: LLM · hermes (catch-all) | `agent/skills/hermes_api.py` | `handle()`, `ask()`, `is_enabled()` |
-| 배치: 설정 | `batch/config.py` | `load_batch_env()`, `read_topics()`, `read_url()`, `output_dir()` |
+| 배치: 설정 | `batch/config.py` | `load_batch_env()`, `read_topics()`, `read_url()`, `output_dir()`, `output_path()` |
 | 배치: claude 질의 (프롬프트는 잡이 넘김) | `batch/claude_query.py` | `ask()`, `build_command()`, `fix_bullets()` |
 | 배치: 정기 LLM 요약 | `batch/daily_briefing.py` | `SYSTEM_PROMPT`, `main()`, `summarize_topic()`, `render_document()` |
 | 배치: URL 브리핑 | `batch/url_briefing.py` | `SYSTEM_PROMPT`, `main()`, `summarize_url()`, `render_document()`, `site_label()` |
@@ -270,8 +270,8 @@ PortAudio 는 장치 인덱스를 열거 순서대로 부여하므로, USB 마�
 ## 배치 잡
 음성 턴 안에서 하기엔 너무 느리거나, 부르지 않아도 돌아야 하는 작업은 `batch/` 에 두고 cron 으로 돌립니다. 현재 잡은 둘입니다.
 
-- **정기 LLM 요약**(`batch/daily_briefing.py`): 관심 주제 목록을 claude CLI 의 웹 검색으로 훑어 `batch/output/YYYY-MM-DD.md` 로 남깁니다.
-- **URL 브리핑**(`batch/url_briefing.py`): 커뮤니티 사이트 한 곳을 `WebFetch` 로 직접 열어 지금 올라온 글들을 `batch/output/url-YYYY-MM-DD.md` 로 남깁니다.
+- **정기 LLM 요약**(`batch/daily_briefing.py`): 관심 주제 목록을 claude CLI 의 웹 검색으로 훑어 `batch/output/daily_briefing/YYYY-MM-DD-HH.md` 로 남깁니다.
+- **URL 브리핑**(`batch/url_briefing.py`): 커뮤니티 사이트 한 곳을 `WebFetch` 로 직접 열어 지금 올라온 글들을 `batch/output/url_briefing/YYYY-MM-DD-HH.md` 로 남깁니다.
 
 두 잡의 결과 모양은 같습니다 — 개요 한두 문장 + 항목 6개, 항목의 제목은 **Discord 마스크 링크**(`[__"제목"__](<주소>)`)로 감쌉니다. 알림이 같은 채널에 나란히 올라오므로 읽는 쪽이 규칙을 하나만 익히면 되게 맞춘 것입니다. 자세한 내용은 [`batch/README.md`](batch/README.md).
 
@@ -287,7 +287,7 @@ cp batch/.env.example batch/.env      # 최초 1회: 주제·URL·모델 설정 
 [System] claude CLI 모델: claude-sonnet-5 / effort: low
 [System] claude 턴 수: 4 (검색 사용)
 [완료] '오픈소스 LLM 동향' (26.6초)
-[System] 저장: batch/output/2026-07-30.md
+[System] 저장: batch/output/daily_briefing/2026-07-30-07.md
 [System] 완료 (26.6초) — 주제 1개 모두 성공
 ```
 - **요약 분량(개요 150자 + 항목 6개 · 항목당 설명 80자)은 Discord 메시지 예산에서 역산한 값이고, 주제를 하루 하나만 돌린다는 전제입니다.** 본문 상한 2000자에서 머리말·잘림 표시를 빼면 1,921자를 쓸 수 있고, 지시대로면 문서가 약 1,360자라 **모델이 47% 더 써도** 잘리지 않습니다. 주제를 2개 이상으로 늘리면 이 계산이 깨져 뒤 주제가 메시지에서 빠지므로(파일에는 남음), 주제별 알림이 필요하면 `--topic` 을 단 cron 줄을 나누는 편이 낫습니다. 상한을 넘긴 날에는 실행 로그에 `[경고] 문서가 Discord 본문 상한을 넘었습니다: …` 가 남습니다.
@@ -295,7 +295,7 @@ cp batch/.env.example batch/.env      # 최초 1회: 주제·URL·모델 설정 
 - `claude 턴 수` 는 검색을 실제로 썼는지 보는 가장 싼 지표입니다 — `1` 이면 모델이 기억으로만 답한 것이니, 최신 정보를 기대했다면 `CLAUDE_CLI_ALLOWED_TOOLS` 를 확인하세요.
 - 소요 시간은 주제 수와 `CLAUDE_CLI_EFFORT` 에 비례합니다 (위는 주제 1개 · `effort=low` 측정치).
 
-- 결과는 `batch/output/YYYY-MM-DD.md`. 같은 날 다시 돌리면 덮어씁니다. 저장 직후, 웹훅을 설정해 두었다면 그 파일을 읽어 **Discord 로 보냅니다**(아래 참고).
+- 결과는 **잡 이름 디렉터리 아래 실행 시각**으로 남습니다 — `batch/output/<잡 이름>/YYYY-MM-DD-HH.md`. 파일명이 시(hour)까지라 같은 시간대의 재실행은 덮어쓰고(실패 후 다시 돌린 것이 옆에 쌓이지 않도록), 시각을 나눠 건 cron 줄끼리는 파일이 따로 남습니다. 저장 직후, 웹훅을 설정해 두었다면 그 파일을 읽어 **Discord 로 보냅니다**(아래 참고).
 - `--topic "주제"`(반복 가능)로 주제 하나만, `--stdout` 으로 파일 없이 출력만, `--output 경로`로 저장 위치를, `--no-notify` 로 저장만 하고 전송을 건너뛸 수 있습니다(같은 날 재실행 시 채널에 중복으로 올리지 않으려는 용도).
 - **`python batch/daily_briefing.py` 로는 실행하지 않습니다.** 그렇게 부르면 `sys.path[0]` 이 `batch/` 가 되어 `import agent` 가 깨집니다. `-m` 을 쓰세요(`python -m agent.text_norm` 과 같은 방식).
 - 주제 하나가 실패해도 잡 전체를 멈추지 않습니다. 실패 사유를 그 자리에 적고 나머지를 계속 요약한 뒤, 종료 코드로 알립니다: `0` 전부 성공, `1` 설정 문제로 아무것도 안 함, `2` 문서는 만들었지만 실패한 주제가 있거나 Discord 전송에 실패함. 웹훅을 아예 설정하지 않은 것은 실패가 아닙니다(`0`).
@@ -309,8 +309,8 @@ discord_notify.notify(text)     # 성공 True / 실패 False (예외 없음 — 
 ```
 ```bash
 # 단독 실행 (웹훅 확인·수동 재전송)
-./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md
-./bin/python -m batch.discord_notify --file batch/output/2026-07-30.md --dry-run   # 보내지 않고 본문만 확인
+./bin/python -m batch.discord_notify --file batch/output/daily_briefing/2026-07-30-07.md
+./bin/python -m batch.discord_notify --file batch/output/url_briefing/2026-07-30-07.md --dry-run   # 보내지 않고 본문만 확인
 ```
 - 설정은 `batch/.env` 의 `DISCORD_WEBHOOK_URL`(비우면 전송 건너뜀 — 이 값이 곧 on/off 스위치), `DISCORD_USERNAME`(표시 이름), `DISCORD_TIMEOUT`(기본 15초). 웹훅 URL 자체가 인증 수단이라 로그에 출력하지 않습니다.
 - Discord 본문 상한(2000자)을 넘으면 **줄 경계에서 자르고 `(...생략)`** 을 붙입니다. 전문은 원본 `.md` 파일에 남아 있으므로 여러 메시지로 쪼개지 않습니다(채널이 알림으로서 안 읽히게 되므로).

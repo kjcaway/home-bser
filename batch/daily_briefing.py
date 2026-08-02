@@ -1,4 +1,4 @@
-"""정기 LLM 요약 배치 잡 — 관심 주제를 웹 검색으로 훑어 날짜별 마크다운으로 남긴다.
+"""정기 LLM 요약 배치 잡 — 관심 주제를 웹 검색으로 훑어 실행 시각별 마크다운으로 남긴다.
 
     ./bin/python -m batch.daily_briefing                    # batch/.env 의 주제 전체
     ./bin/python -m batch.daily_briefing --topic "AI 동향"    # 주제 하나만 (반복 지정 가능)
@@ -7,9 +7,10 @@
     ./bin/python -m batch.daily_briefing --no-notify         # 저장만 하고 Discord 전송 생략
 
 주제 목록은 `batch/.env` 의 `BRIEFING_TOPICS`(쉼표 구분), 저장 위치는
-`BRIEFING_OUTPUT_DIR`(기본 `batch/output/`)에서 읽는다. 결과 파일명은
-`YYYY-MM-DD.md` 이고, 같은 날 다시 돌리면 **덮어쓴다** (하루에 한 번 도는 잡이므로
-누적보다 재실행 가능한 편이 낫다).
+`BRIEFING_OUTPUT_DIR`(기본 `batch/output/`)에서 읽는다. 결과는 **잡 이름 디렉터리 아래
+실행 시각으로** 남는다 — `batch/output/daily_briefing/YYYY-MM-DD-HH.md`. 같은 시간대에
+다시 돌리면 덮어쓰고(실패 후 재실행이 옆에 쌓이지 않는다), 다른 시각에 돌리면 파일이
+따로 남는다 (`batch/config.output_path()` 참고).
 
 저장이 끝나면 `DISCORD_WEBHOOK_URL` 이 설정된 경우에 한해 그 파일을 Discord 로 보낸다
 (`batch/discord_notify.py`). 웹훅이 없으면 조용히 넘어가므로 알림을 쓰지 않는 환경에서도
@@ -44,11 +45,15 @@ from pathlib import Path
 
 from agent.skills.claude_p import is_enabled
 from batch import claude_query, discord_notify
-from batch.config import load_batch_env, output_dir, read_topics
+from batch.config import load_batch_env, output_path, read_topics
 
 EXIT_OK = 0
 EXIT_CONFIG = 1
 EXIT_PARTIAL = 2
+
+# 결과를 담을 하위 디렉터리 이름. 모듈 이름과 같게 둔다 — 로그에 찍힌 잡 이름
+# (`-m batch.daily_briefing`)과 결과가 쌓이는 자리를 따로 외울 필요가 없다.
+JOB_NAME = "daily_briefing"
 
 # 주제 요약용 시스템 프롬프트. `claude_query.ask(system_prompt=...)` 로 넘긴다 — 공용
 # 모듈에 기본값을 두지 않는 이유는 그쪽 모듈 주석 참고 (프롬프트는 결과물의 모양이고,
@@ -123,7 +128,8 @@ def parse_args():
              "BRIEFING_TOPICS 대신 이 값들만 사용한다.")
     parser.add_argument(
         "--output", metavar="경로",
-        help="결과를 저장할 파일 경로 (기본: <BRIEFING_OUTPUT_DIR>/YYYY-MM-DD.md)")
+        help="결과를 저장할 파일 경로 "
+             "(기본: <BRIEFING_OUTPUT_DIR>/daily_briefing/YYYY-MM-DD-HH.md)")
     parser.add_argument(
         "--stdout", action="store_true",
         help="파일로 저장하지 않고 표준출력으로 내보낸다 (cron 메일·디버깅용). "
@@ -277,7 +283,10 @@ def main():
         print("       batch/.env 의 BRIEFING_TOPICS 를 채우거나 --topic 으로 지정하세요.")
         return EXIT_CONFIG
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    # 실행 시각을 한 번만 읽어 문서의 날짜와 결과 파일명이 같은 값에서 나오게 한다
+    # (자정·정시를 걸친 실행에서 둘이 어긋나지 않도록 — `output_path()` 주석 참고).
+    run_at = datetime.now()
+    today = run_at.strftime("%Y-%m-%d")
     print(f"[System] {today} 브리핑 시작 — 주제 {len(topics)}개")
 
     sections = []
@@ -300,7 +309,8 @@ def main():
         if discord_notify.is_enabled():
             print("[System] --stdout 이므로 Discord 전송을 건너뜁니다.")
     else:
-        path = output_dir() / f"{today}.md" if args.output is None else Path(args.output)
+        path = (output_path(JOB_NAME, run_at) if args.output is None
+                else Path(args.output))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(document, encoding="utf-8")
         print(f"[System] 저장: {path}")
