@@ -1,23 +1,9 @@
-"""Discord 웹훅으로 텍스트 메시지를 보내는 배치 공용 모듈.
+"""Discord 웹훅 전송 — 잡이 아니라 잡들이 가져다 쓰는 공용 부품.
 
-    ./bin/python -m batch.discord_notify "테스트 메시지"
-    ./bin/python -m batch.discord_notify --file batch/output/daily_briefing/2026-07-30-07.md
-    ./bin/python -m batch.discord_notify --file batch/output/url_briefing/2026-07-30-07.md --dry-run
+    ./bin/python -m batch.discord_notify "메시지" | --file 경로 [--dry-run]
 
-웹훅 URL 은 `batch/.env` 의 `DISCORD_WEBHOOK_URL` 에서 읽는다 (루트 `.env` 가 아니다 —
-`batch/config.py` 의 `load_batch_env()` 주석 참고).
-
-**첨부파일이 아니라 메시지 본문으로 보낸다.** 그래서 Discord 의 본문 길이 상한
-(`CONTENT_LIMIT`, 2000자)이 그대로 제약이 되고, 넘치면 `truncate()` 가 잘라 `(...생략)`
-을 붙인다. 자르는 대신 여러 메시지로 쪼개 보내지 않는 이유는 알림이 목적이기 때문이다 —
-전문은 어차피 원본 파일에 남아 있고, 채널에 같은 잡의 메시지가 여러 개 쌓이면 알림으로서
-오히려 읽히지 않는다.
-
-**잡에서 쓸 때는 `notify()`, 직접 다룰 때는 `send()`.** 둘의 차이는 실패 처리뿐이다.
-`send()` 는 예외를 올리고, `notify()` 는 잡아서 로그만 남기고 `False` 를 반환한다.
-배치 잡의 마지막 단계(알림)가 실패했다고 이미 만들어 둔 결과물까지 실패로 만들 이유가
-없으므로, 잡 쪽에서는 `notify()` 를 쓴다 (daily_briefing 이 주제 하나의 실패로 그날
-문서를 통째로 버리지 않는 것과 같은 판단이다).
+첨부파일이 아니라 **메시지 본문**으로 보내므로 2000자 상한이 그대로 제약이고, 넘치면
+`truncate()` 가 자른다. 잡에서는 실패를 삼키는 `notify()`, 직접 다룰 때는 `send()`.
 """
 
 import argparse
@@ -38,56 +24,39 @@ EXIT_SEND_FAILED = 2
 # Discord 메시지 본문(content) 최대 길이. 프로토콜 상수라 설정으로 빼지 않는다.
 CONTENT_LIMIT = 2000
 
-# 잘렸음을 본문에 남기는 문구. 앞의 빈 줄은 마크다운에서 직전 목록/문단과 붙지 않게 한다.
+# 앞의 빈 줄은 마크다운에서 직전 목록/문단과 붙지 않게 한다.
 TRUNCATION_NOTICE = "\n\n(...생략)"
 
 DEFAULT_TIMEOUT = 15.0
 
-# 429(레이트 리밋) 재시도를 기다려 줄 최대 시간(초). 웹훅은 채널당 초당 몇 건 수준으로
-# 제한되므로 보통 1초 미만이 돌아온다. 이보다 길게 요구하면 기다리지 않고 실패로 본다 —
-# cron 잡이 알림 하나 때문에 몇 분씩 매달려 있을 이유가 없다.
+# 429 재시도를 기다려 줄 최대 시간(초). 더 길게 요구하면 기다리지 않고 실패로 본다.
 MAX_RETRY_WAIT = 5.0
 
 
 def webhook_url():
     """`DISCORD_WEBHOOK_URL` 값. 없으면 빈 문자열.
 
-    **로그에 찍지 말 것.** 이 URL 자체가 인증 수단이라, 아는 사람은 누구나 그 채널에
-    글을 쓸 수 있다. 그래서 이 모듈의 오류 메시지에도 URL 은 넣지 않는다.
+    **로그에 찍지 말 것** — 이 URL 자체가 인증 수단이다.
     """
     load_batch_env()
     return os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 
 
 def is_enabled():
-    """웹훅 URL 이 설정돼 있으면 켜진 것으로 본다.
-
-    다른 설정들처럼 `*_ENABLED` 스위치를 따로 두지 않는 이유는, 여기서는 URL 자체가
-    곧 의사표시이기 때문이다 — 보낼 곳이 없는데 켜 두는 상태가 성립하지 않는다.
-    (`CLAUDE_CLI_ENABLED` 가 별도 스위치인 것은 반대 상황이다: CLI 가 깔려 있다는
-    사실만으로 "켜짐"이 되면 설치한 적 없는 의도까지 켜지기 때문.)
-    잠시 끄고 싶으면 `DISCORD_WEBHOOK_URL` 을 주석 처리하거나 값을 비우면 된다.
-    """
+    """웹훅 URL 이 있으면 켜진 것으로 본다 (별도 on/off 키 없음 — 비우면 꺼진다)."""
     return bool(webhook_url())
 
 
 def content_length(text):
-    """Discord 기준으로 길이를 잰다(UTF-16 코드 단위).
-
-    파이썬 `len()` 은 코드포인트를 세지만 이모지처럼 BMP 밖의 문자는 UTF-16 에서 2 를
-    차지한다. 둘 중 큰 쪽으로 재 두면 상한을 넘겨 400 으로 거절당하는 일이 없다.
-    """
+    """Discord 기준 길이(UTF-16 코드 단위) — 이모지는 `len()` 과 달리 2를 차지한다."""
     return len(text.encode("utf-16-le")) // 2
 
 
 def truncate(text, limit=CONTENT_LIMIT, notice=TRUNCATION_NOTICE):
-    """`limit` 을 넘으면 잘라내고 `notice` 를 붙인다. 넘지 않으면 원문 그대로.
+    """`limit` 을 넘으면 잘라내고 `notice` 를 붙인다.
 
-    자를 위치는 **줄 경계**를 우선한다. 마크다운 문서를 줄 한가운데서 끊으면 목록 항목이
-    반 토막 난 채로 보이는데, 줄 단위로 끊으면 잃는 것은 마지막 한 줄뿐이다. 다만 줄바꿈이
-    거의 없는 문서(한 줄짜리 긴 문단)에서는 마지막 줄바꿈이 문서 앞쪽에 있어서 내용을
-    통째로 날릴 수 있으므로, 예산의 절반 이상이 남을 때만 줄 경계를 쓰고 아니면 글자
-    단위로 끊는다.
+    자를 위치는 줄 경계를 우선한다(목록 항목이 반 토막 나지 않게). 다만 줄바꿈이 거의
+    없는 문서에서 내용을 통째로 날리지 않도록, 예산의 절반 이상이 남을 때만 그렇게 한다.
     """
     if content_length(text) <= limit:
         return text
@@ -98,8 +67,7 @@ def truncate(text, limit=CONTENT_LIMIT, notice=TRUNCATION_NOTICE):
         return notice[:limit]
 
     body = text[:budget]
-    # 코드포인트로 자른 뒤 UTF-16 기준으로 다시 재서 초과분을 덜어낸다. 이모지가 없으면
-    # 한 번도 돌지 않고, 있어도 그 개수만큼만 돈다.
+    # 코드포인트로 자른 뒤 UTF-16 기준으로 다시 재서 초과분을 덜어낸다.
     while body and content_length(body) > budget:
         body = body[:-1]
 
@@ -111,14 +79,10 @@ def truncate(text, limit=CONTENT_LIMIT, notice=TRUNCATION_NOTICE):
 
 
 def send(text, webhook=None, username=None, timeout=None):
-    """메시지 하나를 보내고, 실제로 보낸 본문을 반환한다. 실패는 예외로 올린다.
+    """메시지 하나를 보내고 실제로 보낸 본문을 반환한다. 실패는 예외.
 
-    길이 초과는 오류가 아니라 `truncate()` 로 처리한다 — 알림이 목적이라, 길다고 아예
-    못 보내는 것보다 앞부분이라도 가는 편이 낫다.
-
-    `webhook` / `username` / `timeout` 을 주면 `.env` 값보다 우선한다. 잡마다 다른
-    채널로 보내거나(`webhook`), 어느 잡이 보낸 알림인지 이름으로 구분할 때(`username`)
-    쓴다.
+    길이 초과는 오류가 아니라 `truncate()` 로 처리한다.
+    `webhook` / `username` / `timeout` 을 주면 `.env` 값보다 우선한다.
     """
     load_batch_env()
 
@@ -151,9 +115,8 @@ def send(text, webhook=None, username=None, timeout=None):
             response = requests.post(url, json=payload, timeout=timeout)
 
     if response.status_code >= 400:
-        # 본문에 웹훅 URL 은 들어가지 않으므로 그대로 실어도 안전하다. Discord 는 실패
-        # 사유를 JSON 본문으로 주는데(예: 존재하지 않는 웹훅 = 10015), 상태 코드만으로는
-        # 구분되지 않는 경우가 많아 앞부분을 함께 남긴다.
+        # 상태 코드만으로는 구분되지 않는 사유가 많아 본문 앞부분을 함께 남긴다
+        # (본문에 웹훅 URL 은 들어가지 않는다).
         detail = (response.text or "").strip().replace("\n", " ")
         raise RuntimeError(f"Discord 가 HTTP {response.status_code} 로 거절했습니다: {detail[:300]}")
 
@@ -163,9 +126,7 @@ def send(text, webhook=None, username=None, timeout=None):
 def notify(text, webhook=None, username=None, timeout=None):
     """`send()` 의 예외를 삼키는 래퍼. 보냈으면 True, 아니면 False.
 
-    배치 잡에서는 이쪽을 쓴다. 알림 실패로 잡의 결과물(이미 저장된 파일)까지 없던 일이
-    되면 안 되고, cron 로그에 사유만 남으면 충분하기 때문이다. 종료 코드로 구분하고
-    싶다면 반환값을 보고 호출자가 정하면 된다.
+    잡에서는 이쪽을 쓴다 — 알림 실패로 이미 저장된 결과물까지 실패로 만들지 않기 위해.
     """
     if not is_enabled() and webhook is None:
         print("[System] DISCORD_WEBHOOK_URL 이 없어 Discord 전송을 건너뜁니다.")
@@ -203,11 +164,7 @@ def _timeout():
 
 
 def _retry_after(response):
-    """429 응답에서 재시도까지 기다릴 초. 알아낼 수 없으면 None.
-
-    Discord 는 본문 JSON 의 `retry_after`(초, 실수)로 알려주고, 표준 헤더
-    `Retry-After` 도 함께 온다. 본문을 먼저 보고 없으면 헤더로 떨어진다.
-    """
+    """429 응답에서 기다릴 초. 본문 JSON 의 `retry_after` 를 먼저 보고, 없으면 헤더."""
     try:
         value = response.json().get("retry_after")
     except (json.JSONDecodeError, ValueError):
@@ -240,7 +197,7 @@ def parse_args():
 
 
 def main():
-    # 무엇보다 먼저 배치 .env 를 적재한다 (batch/config.load_batch_env 주석 참고).
+    # 무엇보다 먼저 배치 .env 를 적재한다 (batch/config.load_batch_env 참고).
     load_batch_env()
     args = parse_args()
 
